@@ -1,0 +1,67 @@
+# /etc/systemd/system/emailhelper-browser-worker.service
+# EmailHelper browser worker (Node.js + Playwright/Chromium), headless.
+# Installed by deploy/linux/install.sh --with-browser-worker.
+#
+# Hardening is lighter than the agent's on purpose: V8/Chromium need
+# writable+executable memory (no MemoryDenyWriteExecute) and Chromium uses
+# namespaces/extra syscalls (no RestrictNamespaces / tight SystemCallFilter).
+
+[Unit]
+Description=EmailHelper browser worker (Playwright)
+After=network-online.target
+Wants=network-online.target
+Before=emailhelper.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=emailhelper
+Group=emailhelper
+
+Environment=HOME=/var/lib/emailhelper
+Environment=NODE_ENV=production
+Environment=BROWSER_WORKER_HOST=127.0.0.1
+Environment=BROWSER_WORKER_PORT=7801
+Environment=BROWSER_HEADLESS=true
+Environment=BROWSER_PROFILE_DIR=/var/lib/emailhelper/browser-profile
+Environment=BROWSER_SCREENSHOT_DIR=/var/lib/emailhelper/screenshots
+Environment="BROWSER_ALLOWED_UPLOAD_DIRS=/etc/emailhelper/knowledge;/var/lib/emailhelper"
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/emailhelper/ms-playwright
+EnvironmentFile=/etc/emailhelper/emailhelper.env
+
+WorkingDirectory=/var/lib/emailhelper
+ExecStart=/usr/bin/env node /opt/emailhelper/browser-worker/src/index.js
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+
+MemoryHigh=1G
+MemoryMax=2G
+
+# --- Hardening ---------------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+StateDirectory=emailhelper
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/emailhelper
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

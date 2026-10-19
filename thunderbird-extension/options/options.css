@@ -1,0 +1,22 @@
+main { max-width: 720px; margin: 0 auto; padding: 20px 16px 40px; }
+h1 { font-size: 20px; display: flex; align-items: center; gap: 8px; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+section { border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; margin-bottom: 14px; }
+label { display: block; font-weight: 600; margin: 8px 0 4px; }
+label.check { font-weight: normal; display: flex; gap: 8px; align-items: flex-start; }
+input[type="url"], input[type="password"], input[type="text"], select {
+  font: inherit; width: 100%; padding: 6px 8px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--field); color: var(--fg);
+}
+select { width: auto; }
+.row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.row input { flex: 1; min-width: 200px; }
+.hint { color: var(--muted); margin: 4px 0 8px; }
+.result { color: var(--muted); white-space: pre-wrap; }
+.result.ok { color: var(--ok); }
+.result.err { color: var(--err); }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+.actions { display: flex; gap: 10px; align-items: center; position: sticky; bottom: 0; background: var(--bg); padding: 10px 0; }
+code { font-size: 12px; }

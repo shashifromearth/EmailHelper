@@ -1,0 +1,12 @@
+body { width: 340px; padding: 12px 14px; }
+header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+header h1 { font-size: 15px; margin: 0; flex: 1; }
+.stats { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; margin: 8px 0 10px; }
+.stats dt { color: var(--muted); }
+.stats dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.error-head { display: flex; gap: 6px; align-items: baseline; margin-bottom: 3px; }
+.error-head span { color: var(--muted); flex: 1; font-size: 11px; }
+#last-error { margin-bottom: 10px; font-size: 12px; }
+#config-warning { margin-bottom: 8px; }
+footer { display: flex; gap: 6px; flex-wrap: wrap; }
+footer .primary { flex: 1; }

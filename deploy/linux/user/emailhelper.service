@@ -1,0 +1,52 @@
+# ~/.config/systemd/user/emailhelper.service
+# Per-user (desktop session) variant of the EmailHelper agent. Use this when
+# Thunderbird runs in your desktop session and you want the agent, its data
+# and its knowledge files to live in your home directory.
+#
+#   install -Dm0755 target/release/emailhelper ~/.local/bin/emailhelper
+#   install -Dm0644 deploy/linux/user/emailhelper.service ~/.config/systemd/user/emailhelper.service
+#   install -Dm0600 .env ~/.config/emailhelper/emailhelper.env
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now emailhelper.service
+#   loginctl enable-linger "$USER"   # optional: keep running after logout
+#
+# Logs: journalctl --user -u emailhelper -f
+
+[Unit]
+Description=EmailHelper agent (user session)
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment=EH_BIND_ADDR=127.0.0.1:7800
+Environment=EH_DATA_DIR=%h/.local/share/emailhelper
+Environment=EH_DB_PATH=%h/.local/share/emailhelper/emailhelper.db
+Environment=EH_KNOWLEDGE_DIR=%h/.config/emailhelper/knowledge
+Environment=EH_CONFIG_DIR=%h/.config/emailhelper/config
+Environment=RUST_LOG=info
+EnvironmentFile=%h/.config/emailhelper/emailhelper.env
+
+WorkingDirectory=%h/.local/share/emailhelper
+ExecStartPre=/usr/bin/mkdir -p %h/.local/share/emailhelper
+ExecStartPre=%h/.local/bin/emailhelper migrate
+ExecStart=%h/.local/bin/emailhelper serve
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+MemoryHigh=512M
+MemoryMax=1G
+
+# User managers can't apply most sandboxing options without unprivileged user
+# namespaces; these are safe everywhere.
+NoNewPrivileges=yes
+UMask=0077
+# If your distro allows unprivileged user namespaces you can also enable:
+# PrivateTmp=yes
+# ProtectSystem=strict
+# ReadWritePaths=%h/.local/share/emailhelper
+
+[Install]
+WantedBy=default.target

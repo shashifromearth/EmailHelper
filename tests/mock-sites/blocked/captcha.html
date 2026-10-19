@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply - Platform Engineer</title></head>
+<body>
+  <h1>Platform Engineer</h1>
+  <form id="apply-form" action="/submit?ats=captcha" method="post">
+    <div><label for="name">Full name *</label><input id="name" name="name" type="text" required></div>
+    <div><label for="email">Email *</label><input id="email" name="email" type="email" required></div>
+    <div><label for="phone">Phone</label><input id="phone" name="phone" type="tel"></div>
+    <div class="g-recaptcha" data-sitekey="6Lc_fake_site_key_for_tests" style="width:304px;height:78px;border:1px solid #ccc">
+      <iframe title="reCAPTCHA" src="/blocked/fake-recaptcha-anchor.html?k=6Lc_fake" width="304" height="78" style="border:0"></iframe>
+    </div>
+    <button type="submit">Submit application</button>
+  </form>
+</body>
+</html>

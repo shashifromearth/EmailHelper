@@ -1,0 +1,44 @@
+# SearXNG settings for EmailHelper (local, single-user instance).
+# Mounted read-only at /etc/searxng/settings.yml by docker-compose.yml.
+# Only reachable inside the compose network (http://searxng:8080) and on
+# 127.0.0.1:8888 on the host.
+
+use_default_settings: true
+
+general:
+  instance_name: "EmailHelper SearXNG"
+  debug: false
+  enable_metrics: false
+
+server:
+  # Listens inside the container only; compose publishes it on 127.0.0.1.
+  bind_address: "0.0.0.0"
+  port: 8080
+  base_url: "http://127.0.0.1:8888/"
+  # Overridden by the SEARXNG_SECRET environment variable (set in ../.env).
+  # Keep this placeholder different from "ultrasecretkey" so the container
+  # entrypoint does not try to rewrite this read-only file.
+  secret_key: "overridden-by-SEARXNG_SECRET"
+  # The bot limiter is meant for public instances; the agent is the only client.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "GET"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  # json is required by the agent (GET /search?q=...&format=json).
+  formats:
+    - html
+    - json
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 15.0
+  pool_connections: 50
+  pool_maxsize: 10
+
+ui:
+  static_use_hash: true

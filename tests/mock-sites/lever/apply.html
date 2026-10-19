@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Acme - Senior Backend Engineer</title>
+  <style>
+    .application-question { list-style: none; margin: 14px 0; }
+    .application-file-input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+    .required { color: #c00; margin-left: 4px; }
+  </style>
+</head>
+<body>
+  <div class="content-wrapper application-page">
+    <div class="section-wrapper page-full-width">
+      <form class="application-form" method="POST" action="/submit?ats=lever" enctype="multipart/form-data">
+        <input type="hidden" name="accountId" value="abc-123">
+        <div class="section application-form page-centered">
+          <h4>Submit your application</h4>
+          <ul>
+            <li class="application-question resume">
+              <label>
+                <div class="application-label">Resume/CV<span class="required">&#x2731;</span></div>
+                <div class="application-field">
+                  <a class="postings-btn template-btn-utility visible-resume-upload">
+                    <input type="file" name="resume" id="resume-upload-input" class="application-file-input" data-qa="input-resume">
+                    <span class="filename"></span>
+                    <span class="default-label">ATTACH RESUME/CV</span>
+                  </a>
+                </div>
+              </label>
+            </li>
+            <li class="application-question">
+              <label>
+                <div class="application-label">Full name<span class="required">&#x2731;</span></div>
+                <div class="application-field"><input type="text" name="name" required data-qa="name-input"></div>
+              </label>
+            </li>
+            <li class="application-question">
+              <label>
+                <div class="application-label">Email<span class="required">&#x2731;</span></div>
+                <div class="application-field"><input type="email" name="email" required data-qa="email-input"></div>
+              </label>
+            </li>
+            <li class="application-question">
+              <label>
+                <div class="application-label">Phone</div>
+                <div class="application-field"><input type="text" name="phone" data-qa="phone-input"></div>
+              </label>
+            </li>
+            <li class="application-question">
+              <label>
+                <div class="application-label">Current company</div>
+                <div class="application-field"><input type="text" name="org" data-qa="org-input"></div>
+              </label>
+            </li>
+          </ul>
+        </div>
+
+        <div class="section application-form page-centered">
+          <h4>Links</h4>
+          <ul>
+            <li class="application-question">
+              <label>
+                <div class="application-label">LinkedIn URL</div>
+                <div class="application-field"><input type="text" name="urls[LinkedIn]"></div>
+              </label>
+            </li>
+            <li class="application-question">
+              <label>
+                <div class="application-label">GitHub URL</div>
+                <div class="application-field"><input type="text" name="urls[GitHub]"></div>
+              </label>
+            </li>
+          </ul>
+        </div>
+
+        <div class="section application-form page-centered" data-qa="additional-cards">
+          <input type="hidden" name="cards[c1a1][baseTemplate]" value="{}">
+          <h4>Questions</h4>
+          <ul>
+            <li class="application-question custom-question">
+              <div class="application-label full-width">
+                <div class="text">Are you willing to relocate to Bengaluru?<span class="required">&#x2731;</span></div>
+              </div>
+              <div class="application-field full-width required-field">
+                <ul data-qa="multiple-choice">
+                  <li><label><input type="radio" name="cards[c1a1][field0]" value="Yes" required><span class="application-answer-alternative">Yes</span></label></li>
+                  <li><label><input type="radio" name="cards[c1a1][field0]" value="No"><span class="application-answer-alternative">No</span></label></li>
+                  <li><label><input type="radio" name="cards[c1a1][field0]" value="Open to discussion"><span class="application-answer-alternative">Open to discussion</span></label></li>
+                </ul>
+              </div>
+            </li>
+            <li class="application-question custom-question">
+              <div class="application-label full-width">
+                <div class="text">Which languages do you use professionally?</div>
+              </div>
+              <div class="application-field full-width">
+                <ul data-qa="checkboxes">
+                  <li><label><input type="checkbox" name="cards[c1a1][field1]" value="Rust"><span class="application-answer-alternative">Rust</span></label></li>
+                  <li><label><input type="checkbox" name="cards[c1a1][field1]" value="Python"><span class="application-answer-alternative">Python</span></label></li>
+                  <li><label><input type="checkbox" name="cards[c1a1][field1]" value="Go"><span class="application-answer-alternative">Go</span></label></li>
+                </ul>
+              </div>
+            </li>
+          </ul>
+        </div>
+
+        <div class="section application-form page-centered">
+          <h4>Additional information</h4>
+          <textarea name="comments" placeholder="Add a cover letter or anything else you want to share." rows="4"></textarea>
+          <div class="application-question">
+            <label><input type="checkbox" name="consent[store]" value="true"> I agree to Acme storing my data for future opportunities</label>
+          </div>
+        </div>
+
+        <div class="section page-centered last-section-wrapper">
+          <button type="submit" class="postings-btn template-btn-submit" id="btn-submit" data-qa="btn-submit">Submit application</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <script>
+    document.getElementById('resume-upload-input').addEventListener('change', function () {
+      var f = this.files && this.files[0];
+      document.querySelector('.visible-resume-upload .filename').textContent = f ? f.name : '';
+    });
+  </script>
+</body>
+</html>

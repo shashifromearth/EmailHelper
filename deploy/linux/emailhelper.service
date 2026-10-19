@@ -1,0 +1,72 @@
+# /etc/systemd/system/emailhelper.service
+# EmailHelper agent (Rust orchestrator) as a hardened system service.
+# Installed by deploy/linux/install.sh. Desktop-session alternative:
+# deploy/linux/user/emailhelper.service (see deploy/README.md).
+
+[Unit]
+Description=EmailHelper agent (email drafts, job agent, research)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=emailhelper
+Group=emailhelper
+
+# Defaults first; values in the EnvironmentFile take precedence.
+Environment=EH_BIND_ADDR=127.0.0.1:7800
+Environment=EH_DATA_DIR=/var/lib/emailhelper
+Environment=EH_DB_PATH=/var/lib/emailhelper/emailhelper.db
+Environment=EH_KNOWLEDGE_DIR=/etc/emailhelper/knowledge
+Environment=EH_CONFIG_DIR=/etc/emailhelper/config
+Environment=RUST_LOG=info
+EnvironmentFile=/etc/emailhelper/emailhelper.env
+
+WorkingDirectory=/var/lib/emailhelper
+ExecStartPre=/usr/local/bin/emailhelper migrate
+ExecStart=/usr/local/bin/emailhelper serve
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Resource guard rails (idle target is < 250 MB).
+MemoryHigh=512M
+MemoryMax=1G
+TasksMax=256
+LimitNOFILE=8192
+
+# --- Hardening ---------------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+StateDirectory=emailhelper
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/emailhelper
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

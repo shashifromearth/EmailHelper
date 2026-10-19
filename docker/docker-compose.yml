@@ -1,0 +1,249 @@
+# EmailHelper full stack.
+#
+# Run from the docker/ directory and ALWAYS pass the repo-root .env so that
+# ${...} interpolation below (OLLAMA_MODEL, GRAFANA_ADMIN_PASSWORD, ...) sees
+# the same values the containers get through env_file:
+#
+#   docker compose --env-file ../.env up -d                         # core: agent + ollama
+#   docker compose --env-file ../.env --profile jobs up -d          # + browser worker
+#   docker compose --env-file ../.env --profile research up -d      # + SearXNG
+#   docker compose --env-file ../.env --profile monitoring up -d    # + Prometheus/Grafana
+#   docker compose --env-file ../.env --profile "*" up -d           # everything
+#
+# Every published port is bound to 127.0.0.1 only. Do not change that.
+# See docker/README.md for details.
+
+name: emailhelper
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-agent-build: &agent-build
+  context: ..
+  dockerfile: docker/Dockerfile.agent
+
+x-agent-env: &agent-env
+  # Overrides for values in ../.env that only make sense on a native install.
+  EH_BIND_ADDR: "0.0.0.0:7800"
+  EH_ALLOW_NON_LOOPBACK: "true"
+  EH_DATA_DIR: /data
+  EH_DB_PATH: /data/emailhelper.db
+  EH_KNOWLEDGE_DIR: /app/knowledge
+  EH_CONFIG_DIR: /app/config
+  OLLAMA_BASE_URL: http://ollama:11434
+  BROWSER_WORKER_URL: http://browser-worker:7801
+  SEARXNG_URL: http://searxng:8080
+
+x-agent-volumes: &agent-volumes
+  - emailhelper_data:/data
+  - ../knowledge:/app/knowledge:ro
+  - ../config:/app/config:ro
+
+services:
+  # ---------------------------------------------------------------- core ---
+  emailhelper-migrate:
+    # One-shot: applies database migrations before the agent starts.
+    image: emailhelper:local
+    build: *agent-build
+    command: ["migrate"]
+    env_file: ../.env
+    environment: *agent-env
+    volumes: *agent-volumes
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      disable: true
+    restart: "no"
+    logging: *default-logging
+
+  emailhelper:
+    image: emailhelper:local
+    build: *agent-build
+    command: ["serve"]
+    env_file: ../.env
+    environment: *agent-env
+    volumes: *agent-volumes
+    ports:
+      - "127.0.0.1:7800:7800"
+    depends_on:
+      emailhelper-migrate:
+        condition: service_completed_successfully
+      ollama:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging: *default-logging
+    # HEALTHCHECK (`emailhelper healthcheck`) comes from the image.
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_KEEP_ALIVE: "10m"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    logging: *default-logging
+    # Optional NVIDIA GPU (needs NVIDIA Container Toolkit, or Docker Desktop
+    # with WSL2 GPU support). Uncomment:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    # AMD (ROCm): use image ollama/ollama:rocm and add
+    #   devices: ["/dev/kfd", "/dev/dri"]
+
+  ollama-init:
+    # One-shot: pulls the model into the shared ollama_models volume.
+    # Idempotent - a model that is already present is just verified.
+    image: ollama/ollama:latest
+    entrypoint: ["ollama"]
+    command: ["pull", "${OLLAMA_MODEL:-qwen2.5:7b}"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- jobs ---
+  browser-worker:
+    profiles: ["jobs"]
+    image: emailhelper-browser-worker:local
+    build:
+      context: ../browser-worker
+      dockerfile: Dockerfile
+    env_file: ../.env
+    environment:
+      BROWSER_WORKER_HOST: "0.0.0.0"
+      # Required by the worker to bind 0.0.0.0 (private compose network only).
+      BROWSER_ALLOW_REMOTE: "true"
+      BROWSER_WORKER_PORT: "7801"
+      BROWSER_PROFILE_DIR: /data/browser-profile
+      BROWSER_SCREENSHOT_DIR: /data/screenshots
+      BROWSER_HEADLESS: "true"
+      # Same knowledge path as the agent, so file paths it sends resolve here.
+      BROWSER_ALLOWED_UPLOAD_DIRS: "/app/knowledge;/data"
+    volumes:
+      - browser_profile:/data/browser-profile
+      - browser_screenshots:/data/screenshots
+      - ../knowledge:/app/knowledge:ro
+    ports:
+      - "127.0.0.1:7801:7801"
+    shm_size: "1gb"   # Chromium needs more than the 64 MB default /dev/shm
+    # No cap_drop here: the worker image is maintained separately and may
+    # drop privileges itself at startup (which needs SETUID/SETGID).
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:7801/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ------------------------------------------------------------ research ---
+  searxng:
+    profiles: ["research"]
+    image: searxng/searxng:latest
+    environment:
+      SEARXNG_BASE_URL: http://127.0.0.1:8888/
+      # Local-only instance; still set a real value in ../.env.
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-local-only-searxng-secret}
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng_cache:/var/cache/searxng
+    ports:
+      - "127.0.0.1:8888:8080"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ---------------------------------------------------------- monitoring ---
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.listen-address=0.0.0.0:9090
+    volumes:
+      - ../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+    logging: *default-logging
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana-oss:12.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Default is a placeholder that MUST be changed: set GRAFANA_ADMIN_PASSWORD
+      # in ../.env before first start (it is stored in grafana_data afterwards).
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me-now}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SERVER_ROOT_URL: http://127.0.0.1:3000/
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/emailhelper-overview.json
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    logging: *default-logging
+
+volumes:
+  emailhelper_data:
+  ollama_models:
+  browser_profile:
+  browser_screenshots:
+  searxng_cache:
+  prometheus_data:
+  grafana_data:

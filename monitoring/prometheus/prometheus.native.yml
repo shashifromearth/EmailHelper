@@ -1,0 +1,27 @@
+# Prometheus config for docker/docker-compose.monitoring.yml: Prometheus runs
+# in Docker, the agent runs natively on the host (127.0.0.1:7800).
+# Running Prometheus natively instead? Replace host.docker.internal with
+# 127.0.0.1 and the rule file path with the local path of alerts.yml.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    stack: emailhelper
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: emailhelper
+    metrics_path: /metrics
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["host.docker.internal:7800"]
+        labels:
+          service: emailhelper
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

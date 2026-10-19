@@ -1,0 +1,92 @@
+# syntax=docker/dockerfile:1.7
+#
+# EmailHelper agent (Rust orchestrator) image.
+#
+# Build context MUST be the repository root (workspace Cargo.toml lives there):
+#   docker build -f docker/Dockerfile.agent -t emailhelper:local .
+# or simply `docker compose build emailhelper` from docker/.
+#
+# Dependency caching uses BuildKit cache mounts (cargo registry, git checkouts
+# and the target dir) instead of cargo-chef / dummy-main tricks, so incremental
+# rebuilds only recompile changed crates. The context is trimmed by
+# docker/Dockerfile.agent.dockerignore (secrets such as .env never enter it).
+
+ARG RUST_IMAGE=rust:1-bookworm
+ARG RUNTIME_IMAGE=debian:bookworm-slim
+
+############################
+# Builder
+############################
+FROM ${RUST_IMAGE} AS builder
+
+ARG PACKAGE=emailhelper
+ARG BIN=emailhelper
+
+# Native deps commonly pulled in by reqwest/native-tls and bundled SQLite.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Workspace manifest + lockfile (lockfile optional), then the member crate.
+COPY Cargo.toml Cargo.lock* ./
+COPY rust-agent ./rust-agent
+
+# Pre-fetch dependencies into the cached registry, then build in release mode.
+# The target dir is a cache mount, so the binary is copied out of it.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    set -eux; \
+    LOCKED=""; \
+    if [ -f Cargo.lock ]; then LOCKED="--locked"; fi; \
+    cargo fetch ${LOCKED}; \
+    cargo build --release ${LOCKED} -p "${PACKAGE}" --bin "${BIN}"; \
+    install -D -m 0755 "target/release/${BIN}" /out/emailhelper
+
+############################
+# Runtime
+############################
+FROM ${RUNTIME_IMAGE} AS runtime
+
+ARG UID=10001
+ARG GID=10001
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates libssl3 tzdata \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid "${GID}" emailhelper \
+ && useradd --system --uid "${UID}" --gid emailhelper --home-dir /app \
+            --shell /usr/sbin/nologin --no-create-home emailhelper \
+ && mkdir -p /app/knowledge /app/config /data \
+ && chown -R emailhelper:emailhelper /app /data
+
+COPY --from=builder /out/emailhelper /usr/local/bin/emailhelper
+
+WORKDIR /app
+
+# 0.0.0.0 is only reachable inside the compose network; docker-compose.yml
+# publishes the port on 127.0.0.1 exclusively. Never publish it on 0.0.0.0.
+ENV EH_BIND_ADDR=0.0.0.0:7800 \
+    EH_ALLOW_NON_LOOPBACK=true \
+    EH_DATA_DIR=/data \
+    EH_DB_PATH=/data/emailhelper.db \
+    EH_KNOWLEDGE_DIR=/app/knowledge \
+    EH_CONFIG_DIR=/app/config \
+    RUST_LOG=info
+
+# knowledge/ and config/ are bind-mounted (read-only) by compose; /data holds
+# the SQLite database, FTS index and any agent state.
+VOLUME ["/data"]
+
+EXPOSE 7800
+
+USER emailhelper:emailhelper
+
+# `emailhelper healthcheck` exits 0 when http://$EH_BIND_ADDR/health is ok.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD ["emailhelper", "healthcheck"]
+
+ENTRYPOINT ["emailhelper"]
+CMD ["serve"]

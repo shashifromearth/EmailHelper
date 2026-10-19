@@ -1,0 +1,33 @@
+# Prometheus config for the docker-compose stack (docker/docker-compose.yml).
+# For an agent running natively on the host use prometheus.native.yml.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    stack: emailhelper
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# No Alertmanager is shipped; firing alerts are visible at
+# http://127.0.0.1:9090/alerts and in Grafana. To route them (mail, Telegram,
+# ...) add an Alertmanager service and uncomment:
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: emailhelper
+    metrics_path: /metrics
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["emailhelper:7800"]
+        labels:
+          service: emailhelper
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

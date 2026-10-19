@@ -1,0 +1,10 @@
+/target
+/dist
+/data
+.env
+node_modules/
+browser-worker/test-results/
+*.db
+*.db-wal
+*.db-shm
+knowledge/resume.pdf

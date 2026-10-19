@@ -1,0 +1,112 @@
+# EmailHelper alert rules. Severity: critical | warning | info.
+# Meanings and runbook hints: monitoring/README.md
+
+groups:
+  - name: emailhelper-availability
+    rules:
+      - alert: AgentDown
+        expr: up{job="emailhelper"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "EmailHelper agent is down"
+          description: "Prometheus could not scrape {{ $labels.instance }} for 2 minutes. Drafts and job applications are not being processed."
+
+      - alert: QueueBacklog
+        expr: max(queue_depth{job="emailhelper"}) > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Processing queue backlog"
+          description: "queue_depth has been above 20 for 10 minutes (current {{ $value }}). The LLM may be slow or stuck."
+
+  - name: emailhelper-processing
+    rules:
+      - alert: HighFailureRate
+        expr: sum by (component) (rate(failures_total{job="emailhelper"}[10m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High failure rate in {{ $labels.component }}"
+          description: "{{ $labels.component }} is failing at {{ $value | humanize }}/s (threshold 0.1/s) over the last 10 minutes."
+
+      - alert: ValidationFailuresSpike
+        expr: sum(increase(validation_failures_total{job="emailhelper"}[30m])) > 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Draft validation failures spiking"
+          description: "{{ $value | humanize }} drafts failed validation in the last 30 minutes. Check the knowledge base, tone.md and the LLM model."
+
+      - alert: EmailProcessingSlow
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(processing_duration_seconds_bucket{job="emailhelper",workflow="email"}[15m]))
+          ) > 30
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Email processing p95 above 30s"
+          description: "p95 email processing time is {{ $value | humanizeDuration }} (target: draft in under 15s)."
+
+  - name: emailhelper-dependencies
+    rules:
+      - alert: LLMErrors
+        expr: |
+          (
+            sum by (provider) (rate(llm_requests_total{job="emailhelper",status="error"}[10m]))
+              /
+            sum by (provider) (rate(llm_requests_total{job="emailhelper"}[10m]))
+          ) > 0.25
+          and
+          sum by (provider) (rate(llm_requests_total{job="emailhelper",status="error"}[10m])) > 0.005
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM provider {{ $labels.provider }} is returning errors"
+          description: "{{ $value | humanizePercentage }} of {{ $labels.provider }} requests failed over 10 minutes."
+
+      - alert: LLMFallbackInUse
+        expr: sum by (provider) (increase(llm_requests_total{job="emailhelper",status="fallback"}[30m])) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "LLM fallback used for {{ $labels.provider }}"
+          description: "Requests fell back from {{ $labels.provider }} (to Ollama) in the last 30 minutes. Check API keys / quotas."
+
+      - alert: PlaywrightFailures
+        expr: sum by (operation) (increase(playwright_failures_total{job="emailhelper"}[30m])) > 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Browser worker failing on {{ $labels.operation }}"
+          description: "{{ $value | humanize }} Playwright failures for {{ $labels.operation }} in 30 minutes. Is the browser worker up, logged in, and not rate-limited?"
+
+      - alert: TelegramFailures
+        # Telegram errors are counted in failures_total{component="telegram"}.
+        expr: sum(increase(failures_total{job="emailhelper",component=~"telegram.*"}[15m])) > 2
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Telegram notifications failing"
+          description: "{{ $value | humanize }} Telegram failures in 15 minutes. Check TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID and connectivity."
+
+  - name: emailhelper-jobs
+    rules:
+      - alert: ApplicationsBlocked
+        expr: sum by (reason) (increase(applications_blocked_total{job="emailhelper"}[1h])) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "Job application blocked ({{ $labels.reason }})"
+          description: "{{ $value | humanize }} application(s) blocked in the last hour for reason {{ $labels.reason }}. Answer the Telegram question or use /api/v1/applications/{id}/answer."

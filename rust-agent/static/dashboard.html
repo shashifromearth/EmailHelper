@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EmailHelper Dashboard</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5f6b7a; --border: #dfe3e8;
+    --accent: #2f6fde; --ok: #1f8a4c; --warn: #b26a00; --bad: #c0362c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #98a2b3; --border: #2c3340;
+      --accent: #6c9cff; --ok: #4cc38a; --warn: #f0b44c; --bad: #ff7a6e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; }
+  h1 { font-size: 17px; margin: 0; }
+  h2 { font-size: 14px; margin: 0 0 10px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  main { padding: 18px 20px; max-width: 1280px; margin: 0 auto; display: grid; gap: 16px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .tile, section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .tile .v { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .tile .l { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  .scroll { overflow-x: auto; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); }
+  .s-submitted, .s-applied { color: var(--ok); border-color: var(--ok); }
+  .s-blocked, .s-awaiting_human, .s-awaiting_approval { color: var(--warn); border-color: var(--warn); }
+  .s-failed { color: var(--bad); border-color: var(--bad); }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+  input, button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  button { cursor: pointer; }
+  #err { color: var(--bad); }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+  @media (max-width: 520px) { .grid2 { grid-template-columns: 1fr; } header { flex-wrap: wrap; gap: 8px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>EmailHelper</h1>
+  <div><span id="err"></span> <input id="token" type="password" placeholder="API token" size="18"> <button id="save">Connect</button> <button id="refresh">Refresh</button></div>
+</header>
+<main>
+  <div class="tiles" id="tiles"></div>
+  <section><h2>Waiting for you</h2><div class="scroll" id="questions"></div></section>
+  <section><h2>Applications</h2><div class="scroll" id="apps"></div></section>
+  <div class="grid2">
+    <section><h2>Top jobs</h2><div class="scroll" id="jobs"></div></section>
+    <section><h2>Company pipeline</h2><div class="scroll" id="companies"></div></section>
+  </div>
+  <section><h2>Recruiters</h2><div class="scroll" id="recruiters"></div></section>
+</main>
+<script>
+(function () {
+  "use strict";
+  var KEY = "eh_token";
+  function getToken() { try { return sessionStorage.getItem(KEY) || ""; } catch (e) { return ""; } }
+  function setToken(t) { try { sessionStorage.setItem(KEY, t); } catch (e) {} }
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]; }); }
+  function link(u, t) { return u && /^https?:\/\//.test(u) ? '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + esc(t || u) + '</a>' : esc(t || ""); }
+  function pill(s) { return '<span class="pill s-' + esc(s) + '">' + esc(s) + '</span>'; }
+  function table(cols, rows) {
+    if (!rows.length) return '<p class="muted">Nothing yet.</p>';
+    return '<table><thead><tr>' + cols.map(function (c) { return '<th>' + esc(c) + '</th>'; }).join("") + '</tr></thead><tbody>' +
+      rows.map(function (r) { return '<tr>' + r.map(function (c) { return '<td>' + c + '</td>'; }).join("") + '</tr>'; }).join("") + '</tbody></table>';
+  }
+  function tile(v, l) { return '<div class="tile"><div class="v">' + esc(v) + '</div><div class="l">' + esc(l) + '</div></div>'; }
+
+  async function load() {
+    var err = document.getElementById("err");
+    err.textContent = "";
+    var t = getToken();
+    if (!t) { err.textContent = "Enter the API token (EH_API_TOKEN)."; return; }
+    var res;
+    try { res = await fetch("/api/v1/dashboard", { headers: { "X-EmailHelper-Token": t } }); }
+    catch (e) { err.textContent = "Agent unreachable."; return; }
+    if (res.status === 401) { err.textContent = "Invalid token."; return; }
+    if (!res.ok) { err.textContent = "Error " + res.status; return; }
+    var d = await res.json();
+    var p = d.pipeline || {};
+    document.getElementById("tiles").innerHTML =
+      tile(d.emails_processed, "Emails processed") + tile((d.drafts || {}).total, "Drafts created") +
+      tile((d.drafts || {}).review_required, "Drafts needing review") + tile(p.applied, "Applied") +
+      tile(p.in_progress, "In progress") + tile(p.blocked, "Blocked") + tile(p.awaiting_approval, "Awaiting approval") +
+      tile(p.failed, "Failed") + tile(d.interviews, "Interviews") + tile((d.recruiters || []).length, "Recruiters");
+    document.getElementById("questions").innerHTML = table(["Ref", "Question", "Reason", "Asked"],
+      (d.questions || []).map(function (q) { return [esc(q.ref_code), esc(q.question), esc(q.reason), esc(q.created_at)]; }));
+    document.getElementById("apps").innerHTML = table(["Company", "Role", "Status", "Step / blocker", "Score", "Updated"],
+      (d.applications || []).map(function (a) {
+        return [esc(a.company), link(a.url, a.role), pill(a.status), esc(a.blocker ? a.blocker + ": " + (a.blocker_detail || "") : (a.step || "")),
+          '<span class="num">' + esc(a.score) + '</span>', esc(a.updated_at)];
+      }));
+    document.getElementById("jobs").innerHTML = table(["Score", "Role", "Company", "Where", "Decision", "Status"],
+      (d.jobs || []).slice(0, 25).map(function (j) {
+        return ['<span class="num">' + esc(j.score) + '</span>', link(j.url, j.title), esc(j.company), esc([j.location, j.remote].filter(Boolean).join(" · ")), esc(j.decision), pill(j.status)];
+      }));
+    var cp = d.company_pipeline || {};
+    document.getElementById("companies").innerHTML = table(["Company", "Statuses"],
+      Object.keys(cp).map(function (k) { return [esc(k), Object.keys(cp[k]).map(function (s) { return pill(s) + " " + esc(cp[k][s]); }).join(" ")]; }));
+    document.getElementById("recruiters").innerHTML = table(["Name", "Title", "Company", "Contact", "Rank", "Source"],
+      (d.recruiters || []).map(function (r) { return [esc(r.name), esc(r.title), esc(r.company), r.linkedin_url ? link(r.linkedin_url, "LinkedIn") : esc(r.email), esc(r.rank_score), esc(r.source)]; }));
+  }
+  document.getElementById("save").addEventListener("click", function () { setToken(document.getElementById("token").value.trim()); load(); });
+  document.getElementById("refresh").addEventListener("click", load);
+  load();
+  setInterval(load, 60000);
+})();
+</script>
+</body>
+</html>

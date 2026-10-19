@@ -1,0 +1,65 @@
+# Monitoring only: Prometheus + Grafana in Docker, scraping an EmailHelper
+# agent that runs NATIVELY on the host (e.g. the Windows scheduled-task install
+# listening on 127.0.0.1:7800).
+#
+#   cd docker
+#   docker compose -f docker-compose.monitoring.yml --env-file ../.env up -d
+#
+# Docker Desktop (Windows/macOS) forwards host.docker.internal to the host's
+# loopback, so the agent can keep binding to 127.0.0.1. On Linux, prefer the
+# full docker-compose.yml or run Prometheus natively (see monitoring/README.md).
+# Ports are published on 127.0.0.1 only.
+
+name: emailhelper-monitoring
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.listen-address=0.0.0.0:9090
+    volumes:
+      - ../monitoring/prometheus/prometheus.native.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana-oss:12.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Placeholder that MUST be changed: set GRAFANA_ADMIN_PASSWORD in ../.env.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me-now}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SERVER_ROOT_URL: http://127.0.0.1:3000/
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/emailhelper-overview.json
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    logging: *default-logging
+
+volumes:
+  prometheus_data:
+  grafana_data:

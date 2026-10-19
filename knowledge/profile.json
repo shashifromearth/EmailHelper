@@ -1,0 +1,16 @@
+{
+  "full_name": "Asha Rao",
+  "email": "asha.rao@example.com",
+  "phone": "+91 98765 43210",
+  "location": "Bengaluru, India",
+  "city": "Bengaluru",
+  "country": "India",
+  "linkedin_url": "https://www.linkedin.com/in/asha-rao-example",
+  "github_url": "https://github.com/asha-rao-example",
+  "portfolio_url": "https://asharao.example.com",
+  "work_authorization": "Yes - Indian citizen, authorized to work in India",
+  "requires_sponsorship": false,
+  "notice_period": "30 days",
+  "willing_to_relocate": false,
+  "signature": "Best regards,\nAsha Rao"
+}

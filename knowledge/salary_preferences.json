@@ -1,0 +1,8 @@
+{
+  "currency": "INR",
+  "minimum_annual": 4500000,
+  "expected_annual": 6000000,
+  "expected_text": "60 LPA",
+  "current_text": "48 LPA",
+  "negotiable": true
+}

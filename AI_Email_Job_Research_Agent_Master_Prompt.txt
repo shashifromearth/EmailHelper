@@ -1,0 +1,341 @@
+MASTER IMPLEMENTATION PROMPT – LOCAL AI EMAIL ASSISTANT + JOB AGENT + RESEARCH AGENT
+
+You are a Principal Software Architect, Senior Rust Engineer, Thunderbird Extension Developer, AI Engineer, DevOps Engineer, SRE, QA Lead, Security Engineer, and Playwright Automation Specialist.
+
+MISSION
+Build a production-ready local-first AI platform consisting of:
+
+1. Email Agent
+2. Job Application Agent
+3. Research Agent
+
+The system must operate autonomously, use local AI by default, support optional cloud LLMs, create email drafts, discover jobs, apply for jobs, perform recruiter outreach assistance, and provide observability, monitoring, testing, recovery, and Telegram interaction.
+
+EXECUTION MODE
+- Work autonomously.
+- Do not pause for implementation confirmations.
+- Make reasonable engineering decisions.
+- Refactor whenever required.
+- Execute tests automatically.
+- Fix discovered issues automatically.
+- Continue until all acceptance criteria pass.
+- Respect authentication boundaries, platform policies, and user-configured permissions.
+
+====================================================
+SYSTEM ARCHITECTURE
+====================================================
+
+Thunderbird
+   |
+Thunderbird Extension
+   |
+Rust Orchestrator
+   |
+---------------------------------
+| Email Agent                  |
+| Job Application Agent        |
+| Research Agent               |
+---------------------------------
+   |
+Ollama / Gemini / OpenAI
+   |
+SQLite + Knowledge Base
+   |
+Telegram Bot
+
+====================================================
+EMAIL AGENT
+====================================================
+
+Features:
+- Detect incoming emails.
+- Multi-account support.
+- Gmail.
+- Outlook.
+- Zoho.
+- IMAP accounts.
+- Deduplication.
+- Classification.
+- Context retrieval.
+- Draft generation.
+- Draft validation.
+- Draft creation.
+- Audit logging.
+- Telegram notification.
+
+Never automatically send emails.
+Only create drafts.
+
+Classification:
+- Support
+- Sales
+- Complaint
+- Partnership
+- Recruiting
+- Invoice
+- Follow-up
+- Spam
+
+Workflow:
+New Email
+-> Classification
+-> Context Retrieval
+-> Draft Generation
+-> Validation
+-> Thunderbird Draft Creation
+-> Telegram Notification
+
+====================================================
+JOB APPLICATION AGENT
+====================================================
+
+Purpose:
+Automatically process job opportunities.
+
+Sources:
+- LinkedIn alerts
+- Naukri alerts
+- Glassdoor alerts
+- Wellfound
+- Greenhouse
+- Lever
+- Ashby
+- Recruiter emails
+- Career sites
+
+Workflow:
+Email Received
+-> Detect Job Opportunity
+-> Extract Job URL
+-> Open via Playwright
+-> Extract Job Details
+-> Match Against Resume
+-> Generate Cover Letter
+-> Fill Forms
+-> Upload Resume
+-> Submit Application
+-> Notify Telegram
+
+Job Matching:
+- Skills
+- Experience
+- Salary
+- Location
+- Remote preference
+- Tech stack
+
+Store:
+- Company
+- Role
+- URL
+- Application Date
+- Status
+- Score
+
+Human Escalation:
+If application becomes blocked:
+
+Examples:
+- CAPTCHA
+- OTP
+- MFA
+- Unknown Question
+- Unexpected Form
+- Upload Failure
+- Access Denied
+
+Telegram Message:
+Company:
+Role:
+Question:
+Reason:
+
+User Reply:
+Agent reads reply.
+Agent resumes automatically.
+
+Recovery:
+Persist browser session.
+Persist cookies.
+Persist workflow state.
+Resume after restart.
+
+====================================================
+RESEARCH AGENT
+====================================================
+
+FEATURE 1
+Daily Job Discovery
+
+Run every morning.
+
+Job Search Terms:
+- AI Architect
+- Lead AI Engineer
+- Staff AI Engineer
+- Rust Engineer
+- Remote AI Jobs
+- India AI Jobs
+- GenAI Architect
+
+Use:
+- SearXNG
+- RSS Feeds
+- Company Career Pages
+- Greenhouse
+- Lever
+- Ashby
+- Playwright when required
+
+Collect:
+- Title
+- Company
+- Salary
+- Location
+- URL
+- Skills
+
+Match against resume.
+Rank jobs.
+Store in SQLite.
+
+Send Telegram summary.
+
+FEATURE 2
+Recruiter Discovery
+
+When recruiter email or job email arrives:
+
+Agent:
+- Extract company.
+- Research company.
+- Open LinkedIn (user-authenticated session if available).
+- Find recruiters.
+- Find hiring managers.
+- Find talent acquisition contacts.
+- Rank contacts.
+
+Generate outreach drafts.
+
+Store:
+- Name
+- Company
+- Role
+- LinkedIn URL
+
+Notify via Telegram.
+
+Default mode:
+Draft outreach messages for review.
+
+====================================================
+LLM SUPPORT
+====================================================
+Default:
+Ollama
+
+Supported:
+- qwen2.5
+- llama3
+- mistral
+
+Remote Optional:
+- Gemini
+- OpenAI
+
+Behavior:
+If API keys absent:
+Use Ollama automatically.
+
+====================================================
+DATABASE
+====================================================
+SQLite
+
+Tables:
+- emails
+- jobs
+- applications
+- recruiters
+- processing_jobs
+- audit_logs
+- drafts
+- settings
+
+====================================================
+OBSERVABILITY
+====================================================
+
+Structured Logging
+Prometheus
+Grafana
+Health Endpoints
+
+Metrics:
+- emails_processed_total
+- drafts_created_total
+- jobs_discovered_total
+- applications_started_total
+- applications_completed_total
+- recruiter_matches_total
+- telegram_notifications_total
+- failures_total
+
+====================================================
+TELEGRAM
+====================================================
+
+Events:
+- Draft created
+- Job discovered
+- Recruiter discovered
+- Application submitted
+- Application blocked
+- Error occurred
+
+Interactive replies supported.
+
+====================================================
+TESTING
+====================================================
+
+Run:
+- Unit tests
+- Integration tests
+- End-to-end tests
+- Playwright tests
+- Resume upload tests
+- Recovery tests
+- Multi-account tests
+- Load tests
+
+Commands:
+cargo fmt
+cargo clippy
+cargo test
+
+Fix discovered failures.
+Retest.
+Repeat until green.
+
+====================================================
+ACCEPTANCE CRITERIA
+====================================================
+
+✓ Email detection works
+✓ Draft generation works
+✓ Multi-account support works
+✓ Telegram notifications work
+✓ Job discovery works
+✓ Job matching works
+✓ Resume upload works
+✓ Application workflow works
+✓ Human escalation works
+✓ Recovery works
+✓ Recruiter discovery works
+✓ Monitoring enabled
+✓ Metrics exposed
+✓ Grafana dashboards available
+✓ Structured logs enabled
+✓ Tests passing
+✓ Documentation complete

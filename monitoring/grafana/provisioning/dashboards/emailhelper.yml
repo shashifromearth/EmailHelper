@@ -1,0 +1,16 @@
+apiVersion: 1
+
+# Loads every *.json under /etc/grafana/dashboards (bind-mounted from
+# monitoring/grafana/dashboards) into the "EmailHelper" folder.
+providers:
+  - name: emailhelper
+    orgId: 1
+    folder: EmailHelper
+    folderUid: emailhelper
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

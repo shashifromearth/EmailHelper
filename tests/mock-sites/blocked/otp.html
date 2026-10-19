@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Verify your email</title></head>
+<body>
+  <h1>Check your inbox</h1>
+  <p>We sent a 6-digit verification code to a***@example.com. Enter it below to continue your application.</p>
+  <form action="/verify" method="post">
+    <label for="code">Verification code</label>
+    <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+    <button type="submit">Verify</button>
+  </form>
+</body>
+</html>

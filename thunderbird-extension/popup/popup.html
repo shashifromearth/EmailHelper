@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>EmailHelper</title>
+    <link rel="stylesheet" href="../shared.css">
+    <link rel="stylesheet" href="popup.css">
+    <script type="module" src="popup.js"></script>
+  </head>
+  <body>
+    <header>
+      <img src="../icons/icon.svg" alt="" width="20" height="20">
+      <h1>EmailHelper</h1>
+      <span id="health" class="pill">checking…</span>
+    </header>
+
+    <div id="config-warning" class="warning" hidden>
+      Not configured. <a href="#" id="open-options-link">Open settings</a> and set the API token.
+    </div>
+
+    <dl class="stats">
+      <dt>LLM</dt><dd id="llm">–</dd>
+      <dt>Backend version</dt><dd id="version">–</dd>
+      <dt>Backend queue depth</dt><dd id="queue">–</dd>
+      <dt>Emails processed</dt><dd id="processed">–</dd>
+      <dt>Drafts created</dt><dd id="drafts-created">–</dd>
+      <dt>Drafts pending</dt><dd id="drafts-pending">–</dd>
+      <dt>Review required</dt><dd id="review">–</dd>
+      <dt>Backend failures</dt><dd id="failures">–</dd>
+      <dt>Waiting to upload</dt><dd id="outbox">–</dd>
+      <dt>Drafts saved here</dt><dd id="local-drafts">–</dd>
+    </dl>
+
+    <div id="last-error" class="error" hidden>
+      <div class="error-head"><strong>Last error</strong> <span id="last-error-time"></span>
+        <button id="clear-error" class="link" type="button">clear</button></div>
+      <div id="last-error-msg"></div>
+    </div>
+
+    <footer>
+      <button id="open-dashboard" type="button" class="primary">Open dashboard</button>
+      <button id="retry" type="button">Retry now</button>
+      <button id="open-options" type="button">Settings</button>
+    </footer>
+  </body>
+</html>

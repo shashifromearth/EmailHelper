@@ -1,0 +1,37 @@
+# ~/.config/systemd/user/emailhelper-browser-worker.service
+# Per-user browser worker. Running in your session lets it use a visible
+# (headful) browser for one-off logins, e.g. LinkedIn: set BROWSER_HEADLESS=false
+# in ~/.config/emailhelper/emailhelper.env, log in once, then switch back.
+#
+#   mkdir -p ~/.local/share/emailhelper/app
+#   cp -r browser-worker ~/.local/share/emailhelper/app/
+#   (cd ~/.local/share/emailhelper/app/browser-worker && npm ci --omit=dev && npx playwright install chromium)
+#   install -Dm0644 deploy/linux/user/emailhelper-browser-worker.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now emailhelper-browser-worker.service
+
+[Unit]
+Description=EmailHelper browser worker (user session)
+After=graphical-session.target network-online.target
+Before=emailhelper.service
+
+[Service]
+Type=simple
+Environment=NODE_ENV=production
+Environment=BROWSER_WORKER_HOST=127.0.0.1
+Environment=BROWSER_WORKER_PORT=7801
+Environment=BROWSER_PROFILE_DIR=%h/.local/share/emailhelper/browser-profile
+Environment=BROWSER_SCREENSHOT_DIR=%h/.local/share/emailhelper/screenshots
+Environment="BROWSER_ALLOWED_UPLOAD_DIRS=%h/.config/emailhelper/knowledge;%h/.local/share/emailhelper"
+EnvironmentFile=%h/.config/emailhelper/emailhelper.env
+# For headful mode systemd --user needs DISPLAY/WAYLAND_DISPLAY imported:
+#   systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY
+
+WorkingDirectory=%h/.local/share/emailhelper
+ExecStart=/usr/bin/env node %h/.local/share/emailhelper/app/browser-worker/src/index.js
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+UMask=0077
+
+[Install]
+WantedBy=default.target

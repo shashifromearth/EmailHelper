@@ -1,0 +1,15 @@
+apiVersion: 1
+
+# Dashboards reference this datasource by uid "prometheus".
+# Inside both compose files Prometheus is reachable as http://prometheus:9090.
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST

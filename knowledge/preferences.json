@@ -1,0 +1,20 @@
+{
+  "remote": "remote_only",
+  "preferred_locations": [
+    "Bengaluru",
+    "Remote",
+    "India"
+  ],
+  "target_roles": [
+    "AI Architect",
+    "Lead AI Engineer",
+    "Staff AI Engineer",
+    "Principal AI Engineer",
+    "Rust Engineer",
+    "GenAI Architect"
+  ],
+  "blacklisted_companies": [],
+  "visa_sponsorship_required": false,
+  "auto_accept_application_consent": false,
+  "how_did_you_hear_default": "LinkedIn"
+}

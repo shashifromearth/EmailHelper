@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>EmailHelper settings</title>
+    <link rel="stylesheet" href="../shared.css">
+    <link rel="stylesheet" href="options.css">
+    <script type="module" src="options.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1><img src="../icons/icon.svg" alt="" width="24" height="24"> EmailHelper settings</h1>
+
+      <section>
+        <h2>Backend</h2>
+        <label for="backend-url">Backend URL</label>
+        <input id="backend-url" type="url" placeholder="http://127.0.0.1:7800" autocomplete="off" spellcheck="false">
+        <p class="hint">Only <code>http://127.0.0.1</code> or <code>http://localhost</code> (any port) are allowed.</p>
+
+        <label for="api-token">API token (<code>EH_API_TOKEN</code>)</label>
+        <div class="row">
+          <input id="api-token" type="password" autocomplete="off" spellcheck="false">
+          <button id="toggle-token" type="button">Show</button>
+        </div>
+
+        <div class="row">
+          <button id="test" type="button">Test connection</button>
+          <span id="test-result" class="result" role="status"></span>
+        </div>
+      </section>
+
+      <section>
+        <h2>Behaviour</h2>
+        <label class="check"><input id="notify" type="checkbox"> Show a desktop notification when a draft is saved</label>
+        <label class="check"><input id="monitor-all" type="checkbox"> Also watch folders other than the Inbox (Thunderbird 121+; mail moved there by filters)</label>
+      </section>
+
+      <section>
+        <h2>Accounts</h2>
+        <p class="hint">New mail is only sent to the backend for checked accounts. The account type is inferred from the account's e-mail domain; override it if it is wrong (for example Google Workspace on a custom domain).</p>
+        <table id="accounts">
+          <thead><tr><th>Enabled</th><th>Account</th><th>Protocol</th><th>Type</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Existing mail</h2>
+        <p class="hint">Queue the unread messages already in the Inbox of every enabled account (up to 200 per account). Messages already handed to the backend are skipped.</p>
+        <div class="row">
+          <button id="process-unread" type="button">Process unread Inbox mail</button>
+          <span id="process-result" class="result" role="status"></span>
+        </div>
+      </section>
+
+      <div class="actions">
+        <button id="save" type="button" class="primary">Save</button>
+        <span id="save-result" class="result" role="status"></span>
+      </div>
+    </main>
+  </body>
+</html>

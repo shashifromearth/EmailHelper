@@ -1,0 +1,11 @@
+# Dockerfile-specific ignore file (BuildKit picks up <Dockerfile>.dockerignore
+# next to the Dockerfile and uses it instead of the context's .dockerignore).
+# Allow-list: only the workspace manifest and the agent crate enter the context.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-agent/
+rust-agent/target/
+**/*.env
+**/.env
+**/.env.*
