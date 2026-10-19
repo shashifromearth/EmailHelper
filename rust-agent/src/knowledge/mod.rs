@@ -20,6 +20,9 @@ pub struct KnowledgeBase {
     dir: PathBuf,
     db: Db,
     people: RwLock<Arc<People>>,
+    /// Fingerprint of the files the people registry reads but the search
+    /// index skips (people.json, private.json), to notice edits to them.
+    people_stamp: std::sync::Mutex<u64>,
 }
 
 /// Restricts retrieval to one person (and optionally one purpose) plus
@@ -59,16 +62,38 @@ impl Scope {
     }
 }
 
+/// Size+mtime fingerprint of people.json and every person's private.json.
+fn unindexed_stamp(dir: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut files = vec![dir.join("people.json")];
+    if let Ok(rd) = std::fs::read_dir(dir.join("people")) {
+        let mut subs: Vec<PathBuf> = rd.flatten().map(|e| e.path().join("private.json")).collect();
+        subs.sort();
+        files.extend(subs);
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for f in files {
+        if let Ok(m) = std::fs::metadata(&f) {
+            f.hash(&mut h);
+            m.len().hash(&mut h);
+            m.modified().ok().hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const CHUNK_CHARS: usize = 900;
 
 impl KnowledgeBase {
     pub fn new(dir: PathBuf, db: Db) -> Self {
         let people = Arc::new(People::load(&dir));
+        let stamp = unindexed_stamp(&dir);
         Self {
             dir,
             db,
             people: RwLock::new(people),
+            people_stamp: std::sync::Mutex::new(stamp),
         }
     }
 
@@ -150,8 +175,13 @@ impl KnowledgeBase {
             changed += 1;
         }
         let removed = self.db.call(move |c| kdb::prune(c, &keep)).await?;
-        if changed > 0 || removed > 0 {
-            tracing::info!(changed, removed, "knowledge index updated");
+        let stamp = unindexed_stamp(&self.dir);
+        let unindexed_changed = match self.people_stamp.lock() {
+            Ok(mut s) => std::mem::replace(&mut *s, stamp) != stamp,
+            Err(_) => false,
+        };
+        if changed > 0 || removed > 0 || unindexed_changed {
+            tracing::info!(changed, removed, private_or_people = unindexed_changed, "knowledge updated");
             self.reload_people();
         }
         Ok(changed)
@@ -410,5 +440,20 @@ PAN card questions go to the secure channel.",
         let hits = kb.search("ABCDE1234F pan", 5).await.unwrap();
         assert!(hits.iter().all(|h| !h.content.contains("ABCDE1234F")));
         assert!(hits.iter().any(|h| h.path == "notes.md"));
+    }
+
+    #[tokio::test]
+    async fn private_json_edits_reload_people() {
+        let d = tempfile::tempdir().unwrap();
+        let k = d.path();
+        std::fs::create_dir_all(k.join("people/a")).unwrap();
+        std::fs::write(k.join("people.json"), r#"{"people":[{"id":"a","name":"A","mailboxes":["a@x.test"]}]}"#).unwrap();
+        std::fs::write(k.join("people/a/private.json"), r#"{"pan":""}"#).unwrap();
+        let kb = KnowledgeBase::new(k.to_path_buf(), Db::open_in_memory().unwrap());
+        kb.reindex().await.unwrap();
+        assert!(kb.people().person("a").unwrap().private.values.get("pan").is_none_or(|v| v.is_empty()));
+        std::fs::write(k.join("people/a/private.json"), r#"{"pan":"ABCDE1234F"}"#).unwrap();
+        kb.reindex().await.unwrap();
+        assert_eq!(kb.people().person("a").unwrap().private.values.get("pan").map(String::as_str), Some("ABCDE1234F"));
     }
 }
