@@ -79,9 +79,11 @@ pub fn prompt_section(items: &[String]) -> String {
     }
     let mut s = String::from(
         "\nQUESTIONNAIRE: the email asks for the items below. Reply with ALL of them as a numbered list, in this \
-order, one line each, formatted `N. <item>: <answer>`. Use FACTS, KNOWLEDGE and my skills only. When the \
-answer isn't known, write `Will confirm` (or `Happy to discuss on a call` for opinions or reasons). Never \
-invent offers, figures, dates or experience.\n",
+order, one line each, formatted `N. <item>: <answer>`. Open with a short greeting and one line of thanks \
+before the list, and close with one line offering a call. Use FACTS, KNOWLEDGE and my skills only, and add \
+no details beyond them (no salary breakdowns, no extra dates). When the answer isn't known, write `Will \
+confirm` (or `Happy to discuss on a call` for opinions or reasons). Never invent offers, figures, dates or \
+experience.\n",
     );
     for (i, it) in items.iter().enumerate() {
         s.push_str(&format!("{}. {}\n", i + 1, it));

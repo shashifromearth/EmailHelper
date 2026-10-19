@@ -248,9 +248,21 @@ pub fn detect_job_email(e: &EmailRecord) -> Option<JobSignal> {
         "candidate",
         "candidacy",
     ]);
+    // Automated mailers that say what they are, whoever sends them (a
+    // company's careers@ address isn't a known job site).
+    let mass_alert = [
+        "job alert",
+        "this job is a match",
+        "we invite you to apply",
+        "invite you to apply",
+        "jobs you may be interested",
+        "recommended jobs",
+        "new job matches",
+        "top job picks",
+    ];
     let kind = if has(&interview) && hiring_context {
         Some(SignalKind::InterviewInvite)
-    } else if source.is_some() && (has(&alert_phrases) || !links.is_empty()) {
+    } else if (source.is_some() && (has(&alert_phrases) || !links.is_empty())) || has(&mass_alert) {
         Some(SignalKind::JobAlert)
     } else if has(&referral) && (has(&outreach) || !links.is_empty()) {
         Some(SignalKind::Referral)
@@ -390,6 +402,22 @@ mod tests {
         assert!(classify_url("https://www.linkedin.com/feed/").is_none());
         assert!(classify_url("https://acme.com/jobs/alerts/unsubscribe").is_none());
         assert!(classify_url("https://jobs.lever.co/acme").is_none());
+    }
+
+    #[test]
+    fn company_job_alerts_are_alerts() {
+        let e = email(
+            "Qualcomm Careers <careers@qualcomm.com>",
+            "Shashi, this job is a match!",
+            "Hi Shashi,
+Based on your profile, we believe you may be a great match for an existing opportunity at Qualcomm! We invite you to apply below.
+This job alert is unrelated to any active opportunities.
+Linux Software Engineer, Lead Senior
+Bangalore, India",
+        );
+        let s = detect_job_email(&e).unwrap();
+        assert_eq!(s.kind, SignalKind::JobAlert);
+        assert!(s.is_alert, "no reply drafted for a mass job alert");
     }
 
     #[test]

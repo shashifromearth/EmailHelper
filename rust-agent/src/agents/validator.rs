@@ -79,7 +79,9 @@ fn money_in(s: &str) -> HashSet<String> {
 
 fn phones_in(s: &str) -> HashSet<String> {
     static R: OnceLock<Regex> = OnceLock::new();
-    re(&R, r"\+?\d[\d\s().-]{8,}\d")
+    // Spaces and tabs only: a number never continues on the next line
+    // ("+91 98…" followed by a "3." list number).
+    re(&R, r"\+?\d[\d \t().-]{8,}\d")
         .find_iter(s)
         .map(|m| {
             m.as_str()
@@ -294,6 +296,20 @@ mod tests {
             "[RFC] process",
         ));
         assert!(!ok.iter().any(|x| x.contains("placeholder")), "{ok:?}");
+    }
+
+    #[test]
+    fn numbers_on_separate_lines_are_not_joined() {
+        let n = rule_checks(&input(
+            "1. Contact Number: +91 9217154759
+3. Email Address: a@b.test
+27. Last Working Day: 19-06-2026
+28. Joining: Immediately",
+            "Phone number: +91 9217154759
+Email: a@b.test
+Last working day: 19-06-2026",
+        ));
+        assert!(!n.iter().any(|x| x.contains("phone")), "{n:?}");
     }
 
     #[test]
