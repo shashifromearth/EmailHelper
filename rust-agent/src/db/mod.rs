@@ -26,6 +26,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("migrations/001_init.sql")),
     (2, include_str!("migrations/002_people.sql")),
     (3, include_str!("migrations/003_attachments.sql")),
+    (4, include_str!("migrations/004_employer_boards.sql")),
 ];
 
 impl Db {

@@ -310,28 +310,36 @@ impl Profile {
 
 /// (canonical name, lowercase aliases matched as whole words)
 const COUNTRIES: &[(&str, &[&str])] = &[
-    ("India", &["india", "indian"]),
+    (
+        "India",
+        &[
+            "india", "indian", "bengaluru", "bangalore", "hyderabad", "pune", "chennai", "mumbai", "gurugram",
+            "gurgaon", "noida", "delhi", "ncr", "kolkata", "ahmedabad", "kochi", "mohali", "chandigarh", "jaipur",
+            "indore", "trivandrum", "thiruvananthapuram", "coimbatore", "mysore", "mysuru",
+        ],
+    ),
     (
         "United States",
-        &["united states", "usa", "u.s.", "america"],
+        &["united states", "usa", "u.s.", "america", "san francisco", "new york", "seattle", "austin", "boston", "chicago", "los angeles", "palo alto", "mountain view"],
     ),
     (
         "United Kingdom",
-        &["united kingdom", "uk", "britain", "england"],
+        &["united kingdom", "uk", "britain", "england", "london"],
     ),
-    ("Canada", &["canada"]),
-    ("Germany", &["germany"]),
-    ("Netherlands", &["netherlands"]),
-    ("Ireland", &["ireland"]),
-    ("France", &["france"]),
+    ("Canada", &["canada", "toronto", "ontario", "vancouver", "montreal"]),
+    ("Germany", &["germany", "berlin", "munich"]),
+    ("Netherlands", &["netherlands", "amsterdam"]),
+    ("Ireland", &["ireland", "dublin"]),
+    ("France", &["france", "paris"]),
+    ("Czechia", &["czechia", "czech republic", "prague"]),
     ("European Union", &["european union", "eu", "europe", "eea"]),
     ("Singapore", &["singapore"]),
-    ("Australia", &["australia"]),
+    ("Australia", &["australia", "sydney", "melbourne"]),
     (
         "United Arab Emirates",
         &["united arab emirates", "uae", "dubai"],
     ),
-    ("Japan", &["japan"]),
+    ("Japan", &["japan", "tokyo"]),
 ];
 
 /// Countries mentioned in free text (whole-word, case-insensitive).

@@ -1,11 +1,15 @@
 //! Job Application Agent: detect opportunities in email, extract and score
 //! postings, and drive applications through the browser worker.
 
+pub mod alerts;
 pub mod answers;
 pub mod application;
+pub mod benchmark;
 pub mod browser;
 pub mod cover_letter;
 pub mod detect;
+pub mod digest;
+pub mod employer;
 pub mod extract;
 pub mod matcher;
 
@@ -24,6 +28,8 @@ use crate::jobs::matcher::Decision;
 use crate::telegram::Event;
 
 const MAX_LINKS_PER_EMAIL: usize = 5;
+/// Jobs taken from one platform alert email.
+const MAX_ALERT_JOBS: usize = 10;
 const MAX_DIRECT_FETCH_BYTES: usize = 2 * 1024 * 1024;
 
 /// Fetch a page: browser worker first (renders JS, keeps sessions), plain HTTP
@@ -129,9 +135,26 @@ pub async fn process_job_email(app: &Arc<App>, email_id: &str) -> AppResult<()> 
         return Ok(());
     };
     let tag = crate::telegram::format::person_tag(&person.name, e.account_email.as_deref());
+    // LinkedIn, Naukri & co. only allow applying inside a logged-in account and
+    // forbid bots: never open their pages; work from the email instead. Links
+    // straight to an employer's own application page are still followed.
+    let platform_links: Vec<detect::JobLink> = signal
+        .links
+        .iter()
+        .filter(|l| alerts::is_login_platform(&l.ats))
+        .cloned()
+        .collect();
+    if alerts::is_login_platform(&signal.source) || !platform_links.is_empty() {
+        process_platform_alert(app, &e, &signal.source, &platform_links, &person, &tag).await?;
+    }
     let vocab = person.profile.all_skills();
     let mut handled = 0usize;
-    for link in signal.links.iter().take(MAX_LINKS_PER_EMAIL) {
+    for link in signal
+        .links
+        .iter()
+        .filter(|l| !alerts::is_login_platform(&l.ats))
+        .take(MAX_LINKS_PER_EMAIL)
+    {
         let page = match fetch_page(app, &link.url).await {
             Ok(p) => p,
             Err(err) => {
@@ -208,6 +231,164 @@ pub async fn process_job_email(app: &Arc<App>, email_id: &str) -> AppResult<()> 
         }
     }
     tracing::info!(email_id, links = handled, "job email processed");
+    Ok(())
+}
+
+/// "5 - 10 years" / "9-13 Yrs" → 5.
+fn min_years(exp: &str) -> Option<f64> {
+    exp.split(|c: char| !c.is_ascii_digit() && c != '.')
+        .find(|s| !s.is_empty())
+        .and_then(|s| s.parse().ok())
+}
+
+fn remote_of(mode: Option<&str>) -> Option<String> {
+    let m = mode?.to_lowercase();
+    Some(
+        if m.contains("remote") {
+            "remote"
+        } else if m.contains("hybrid") {
+            "hybrid"
+        } else if m.contains("office") || m.contains("on-site") || m.contains("onsite") {
+            "onsite"
+        } else {
+            "unknown"
+        }
+        .to_string(),
+    )
+}
+
+/// What an alert says about a job.
+pub fn details_from_alert(a: &alerts::AlertJob) -> JobDetails {
+    JobDetails {
+        title: a.title.clone(),
+        company: a.company.clone(),
+        url: a.url.clone(),
+        location: a.location.clone(),
+        remote: remote_of(a.work_mode.as_deref()),
+        salary: a.salary.clone(),
+        experience: a.experience.clone(),
+        experience_years: a.experience.as_deref().and_then(min_years),
+        skills: a.skills.clone(),
+        ..Default::default()
+    }
+}
+
+/// A LinkedIn/Naukri alert: screen each listed job, find it on the
+/// employer's public board and apply there; jobs that can only be applied to
+/// on the platform go to the daily digest.
+async fn process_platform_alert(
+    app: &Arc<App>,
+    e: &EmailRecord,
+    source: &str,
+    platform_links: &[detect::JobLink],
+    person: &crate::knowledge::Person,
+    tag: &str,
+) -> AppResult<()> {
+    let platform = platform_links
+        .first()
+        .filter(|_| !alerts::is_login_platform(source))
+        .map(|l| l.ats.as_str())
+        .unwrap_or(source);
+    let mut listed = alerts::parse(platform, &e.body_text);
+    if listed.is_empty() {
+        // No job list in the body (recruiter mail, unknown layout): the subject
+        // names the job and the platform link is kept for the person.
+        if let Some(link) = platform_links.first() {
+            let (title, company) = extract::split_title(&e.subject);
+            listed.push(alerts::AlertJob {
+                title,
+                company,
+                url: Some(link.url.clone()),
+                ..Default::default()
+            });
+        }
+    }
+    if listed.is_empty() {
+        tracing::info!(email_id = %e.id, platform, "no jobs found in alert email");
+        return Ok(());
+    }
+    let (mut on_board, mut digest, mut skipped) = (0usize, 0usize, 0usize);
+    for a in listed.iter().take(MAX_ALERT_JOBS) {
+        // 1. Screen on what the alert says (title, company, location).
+        let first = matcher::score(
+            &details_from_alert(a),
+            &person.profile,
+            app.cfg.jobs.auto_apply_threshold,
+            app.cfg.jobs.review_threshold,
+        );
+        let posting = if first.decision == Decision::Skip {
+            None
+        } else {
+            match employer::find_posting(app, a).await {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::warn!(error = %err, company = ?a.company, "employer board lookup failed");
+                    None
+                }
+            }
+        };
+        match posting {
+            // 2a. On the employer's own board: full scoring and the normal application flow.
+            Some(raw) => {
+                let url = raw.details.url.clone().unwrap_or_default();
+                let (job, decision, is_new) =
+                    score_and_store(app, person, &raw.source, raw.source_ref.clone(), raw.details).await?;
+                on_board += 1;
+                if is_new {
+                    app.notifier
+                        .notify_person(
+                            person.telegram_chat_id,
+                            Event::JobFound,
+                            &format!(
+                                "{tag}\n💼 Job Found (via {platform} alert, applying on the employer's site)\nCompany: {}\nRole: {}\nScore: {}/100 → {}\nURL: {url}",
+                                job.details.company.as_deref().unwrap_or("-"),
+                                job.details.title,
+                                job.score.unwrap_or(0),
+                                decision.as_str(),
+                            ),
+                        )
+                        .await;
+                }
+                if decision == Decision::Skip {
+                    let jid = job.id.clone();
+                    app.db.call(move |c| jdb::set_job_status(c, &jid, "skipped")).await?;
+                } else if is_new && app.cfg.jobs.enabled && person.job_agent {
+                    match application::start(app, &job, &url).await {
+                        Ok(_) => {}
+                        Err(crate::error::AppError::Validation(reason)) => {
+                            tracing::warn!(job_id = %job.id, %reason, "application not started");
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+            }
+            // 2b. Platform-only (or skipped): remember it; good ones go to the digest.
+            None => {
+                let (job, decision, is_new) =
+                    score_and_store(app, person, platform, Some(e.id.clone()), details_from_alert(a)).await?;
+                let status = if decision == Decision::Skip {
+                    skipped += 1;
+                    "skipped"
+                } else {
+                    digest += 1;
+                    "digest"
+                };
+                if is_new {
+                    let jid = job.id.clone();
+                    app.db.call(move |c| jdb::set_job_status(c, &jid, status)).await?;
+                }
+            }
+        }
+    }
+    app.audit(
+        "job_agent",
+        "platform_alert_processed",
+        "email",
+        &e.id,
+        json!({ "platform": platform, "listed": listed.len(), "on_employer_board": on_board, "digest": digest, "skipped": skipped }),
+    )
+    .await;
+    tracing::info!(email_id = %e.id, platform, listed = listed.len(), on_board, digest, skipped, "platform alert processed");
     Ok(())
 }
 

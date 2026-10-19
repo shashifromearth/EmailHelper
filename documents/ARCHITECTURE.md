@@ -59,10 +59,19 @@ never calls `compose.sendMessage`. A unit test checks for this.
 ## Job application workflow
 
 ```
-job_email ─► detect links (LinkedIn/Naukri/Glassdoor/Wellfound/Foundit/Greenhouse/Lever/Ashby/Workday/career sites)
+platform alert (LinkedIn/Naukri/Glassdoor/Wellfound/Indeed/Foundit…) — their pages are never opened:
+          ─► jobs read from the alert email itself (title, company, location, link)
+          ─► screened by the matcher on that alone
+          ─► employer's public board looked up (Greenhouse/Lever/Ashby JSON APIs, cached 7 days)
+               found     ─► full posting scored ─► application flow below
+               not found ─► status `digest` ─► daily Telegram digest with links (JOB_DIGEST_TIME)
+
+job_email with direct employer links (Greenhouse/Lever/Ashby/Workday/career sites)
           ─► browser worker /v1/extract (fallback: direct HTTP) ─► JSON-LD JobPosting / heuristics
           ─► matcher (skills 35 · role 20 · experience 15 · salary 15 · location 15) + hard rules
-             (blacklist, salary floor, relocation, visa, no skill overlap)
+             (blacklist, salary floor, relocation, visa, no skill overlap, off-target role,
+             too junior, required language); jobs abroad that don't mention visa
+             sponsorship are never above "review" for someone who needs sponsorship
           ─► decision: ≥80 apply · 60–79 review · <60 skip
           ─► application state machine (persisted in `applications`, resumable):
                inspect form ─► answer fields (profile map → answer memory → RAG+LLM → human)
@@ -82,6 +91,17 @@ Submit modes (`JOB_SUBMIT_MODE`):
 The agent never submits when the score is below threshold, a required
 answer is missing, a CAPTCHA or OTP is unresolved, or the resume upload
 failed.
+
+LinkedIn Easy Apply and Naukri's Apply button work only inside a logged-in
+account, and both sites' terms forbid automated applying. The agent therefore
+never browses those sites; it applies on the employer's own form when it can
+find one and lists the rest in the daily digest.
+
+`emailhelper apply-benchmark [N]` measures the agent on real data without
+submitting anything. It replays stored platform alerts through the lookup,
+then fills the forms of the N best-matching employer-board postings, with no
+submit and no resume upload. It reports how many needed no human help. The
+report is written to `data/benchmark/`.
 
 ## Research workflow
 

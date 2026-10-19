@@ -139,6 +139,9 @@ pub struct JobConfig {
     pub worker_token: String,
     pub worker_timeout: Duration,
     pub max_attempts: u32,
+    /// Daily Telegram digest of jobs the person must apply to themselves.
+    pub digest_time: NaiveTime,
+    pub digest_max: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -325,6 +328,14 @@ impl Config {
             worker_token: s("BROWSER_WORKER_TOKEN").unwrap_or_default(),
             worker_timeout: Duration::from_secs(num("BROWSER_WORKER_TIMEOUT_SECS", 180)?),
             max_attempts: num("JOB_MAX_ATTEMPTS", 3)? as u32,
+            digest_time: {
+                let raw = s_or("JOB_DIGEST_TIME", "19:00");
+                NaiveTime::parse_from_str(&raw, "%H:%M").map_err(|e| ConfigError::Invalid {
+                    key: "JOB_DIGEST_TIME",
+                    message: format!("{raw}: {e}"),
+                })?
+            },
+            digest_max: num("JOB_DIGEST_MAX", 15)? as usize,
         };
 
         let daily_raw = s_or("RESEARCH_DAILY_TIME", "07:30");

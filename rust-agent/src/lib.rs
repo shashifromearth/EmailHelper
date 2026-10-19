@@ -48,5 +48,8 @@ pub async fn start_background(app: &Arc<App>) -> AppResult<Background> {
     if app.cfg.research.enabled {
         handles.push(research::discovery::spawn_scheduler(app.clone()));
     }
+    if app.cfg.jobs.enabled {
+        handles.push(jobs::digest::spawn_scheduler(app.clone()));
+    }
     Ok(Background { handles })
 }

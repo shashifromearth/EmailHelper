@@ -50,6 +50,48 @@ impl MatchResult {
     }
 }
 
+/// Title words that put a role outside an engineering/architecture career.
+const OFF_TARGET: &[&str] = &[
+    "support", "sales", "account executive", "account manager", "marketing", "recruiter", "talent acquisition",
+    "customer success", "product specialist", "designer", "salesforce", "sap", "hcm", "accountant", "legal",
+    "counsel", "nurse", "teacher", "tutor", "business development", "pre-sales", "presales",
+];
+/// Title words for entry-level roles.
+const JUNIOR: &[&str] = &["intern", "internship", "trainee", "junior", "jr", "graduate", "fresher", "entry level", "entry-level", "apprentice"];
+/// Languages a posting may require.
+const LANGUAGES: &[&str] = &[
+    "korean", "japanese", "mandarin", "chinese", "cantonese", "german", "french", "spanish", "portuguese",
+    "italian", "dutch", "arabic", "hebrew", "russian", "polish", "turkish", "vietnamese", "thai", "bahasa",
+    "indonesian", "swedish", "danish", "norwegian", "finnish", "czech",
+];
+/// Phrases saying the employer sponsors work visas.
+const SPONSORS: &[&str] = &[
+    "visa sponsorship available", "visa sponsorship is available", "will sponsor", "we sponsor", "sponsorship provided",
+    "provide visa sponsorship", "offer visa sponsorship", "sponsor work visas", "sponsorship and relocation",
+];
+
+/// A language the posting requires that isn't one of `known`.
+fn required_language(text: &str, known: &[String]) -> Option<&'static str> {
+    LANGUAGES.iter().copied().find(|l| {
+        !known.iter().any(|k| k.eq_ignore_ascii_case(l))
+            && [
+                format!("{l} speaking"),
+                format!("{l}-speaking"),
+                format!("{l} speaker"),
+                format!("fluent in {l}"),
+                format!("fluency in {l}"),
+                format!("{l} fluency"),
+                format!("{l} (native"),
+                format!("native {l}"),
+                format!("business-level {l}"),
+                format!("{l} language skills"),
+                format!("proficiency in {l}"),
+            ]
+            .iter()
+            .any(|p| text.contains(p.as_str()))
+    })
+}
+
 fn tokens(s: &str) -> Vec<String> {
     s.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -94,8 +136,14 @@ pub fn score(
         .filter(|s| !all.iter().any(|a| a.eq_ignore_ascii_case(s)))
         .cloned()
         .collect();
+    let alert_only = job.skills.is_empty()
+        && job.description.as_deref().unwrap_or("").trim().is_empty();
     let skills_score = if job.skills.is_empty() && core.is_empty() {
         17.0
+    } else if alert_only {
+        // Only a title is known (platform alert); don't guess skills from it.
+        notes.push("skills unknown (title only)".into());
+        22.0
     } else {
         let required = job.skills.len().max(1) as f64;
         let coverage =
@@ -117,6 +165,21 @@ pub fn score(
 
     // ---- role/title (20)
     let title_tokens = tokens(&job.title);
+    let title_l = format!(" {} ", job.title.to_lowercase().replace(['-', ',', '/', '(', ')', '|'], " "));
+    if let Some(w) = OFF_TARGET.iter().find(|w| title_l.contains(&format!(" {w} "))) {
+        skip.push(format!("role outside your target roles ({w})"));
+    }
+    let years = p.resume.total_experience_years;
+    let associate_ic = title_tokens.first().is_some_and(|t| t == "associate")
+        && title_tokens.iter().any(|t| ["engineer", "developer", "consultant", "analyst"].contains(&t.as_str()))
+        && !title_tokens.iter().any(|t| ["manager", "director", "principal", "architect"].contains(&t.as_str()));
+    if years >= 5.0 {
+        if let Some(w) = JUNIOR.iter().find(|w| title_l.contains(&format!(" {w} "))) {
+            skip.push(format!("too junior for {years} years of experience ({w})"));
+        } else if associate_ic {
+            skip.push(format!("too junior for {years} years of experience (associate)"));
+        }
+    }
     let role_score = if p.preferences.target_roles.is_empty() {
         10.0
     } else {
@@ -129,11 +192,25 @@ pub fn score(
                     return 0.0;
                 }
                 let hit = rt.iter().filter(|t| title_tokens.contains(t)).count();
-                hit as f64 / rt.len() as f64
+                let ratio = hit as f64 / rt.len() as f64;
+                // The role noun ("Architect", "Engineer") must match, or it's a
+                // different job that shares a buzzword.
+                let head = rt.last().map(String::as_str).unwrap_or("");
+                let head_hit = title_tokens.iter().any(|t| {
+                    t == head || (head == "engineer" && t == "developer") || (head == "architect" && t == "architecture")
+                });
+                if head_hit {
+                    ratio
+                } else {
+                    ratio * 0.4
+                }
             })
             .fold(0.0_f64, f64::max)
             * 20.0
     };
+    if !p.preferences.target_roles.is_empty() && role_score < 8.0 {
+        notes.push("title is far from your target roles".into());
+    }
 
     // ---- experience (15)
     let exp_score = match (job.experience_years, p.resume.total_experience_years) {
@@ -241,6 +318,16 @@ pub fn score(
             .iter()
             .any(|l| !l.is_empty() && where_text.contains(&l.to_lowercase()));
     let location_known = !job.location.as_deref().unwrap_or("").trim().is_empty();
+    // Language requirements (English and Hindi assumed).
+    let known_langs = vec!["english".to_string(), "hindi".to_string()];
+    if let Some(l) = required_language(&format!("{} {}", job.title.to_lowercase(), text), &known_langs) {
+        skip.push(format!("requires {l}"));
+    }
+    // A job in a country the user can't work in, with no word on sponsorship:
+    // never applied automatically.
+    let job_countries = crate::knowledge::profile::countries_in(&where_text);
+    let abroad = needs_visa && !job_countries.is_empty() && !in_authorized;
+    let sponsors = SPONSORS.iter().any(|w| text.contains(w));
     if needs_visa
         && location_known
         && !in_authorized
@@ -263,11 +350,17 @@ pub fn score(
         .clamp(0.0, 100.0) as u8;
     let decision = if !skip.is_empty() || total < review_threshold {
         Decision::Skip
-    } else if total >= auto_threshold {
+    } else if total >= auto_threshold && !(abroad && !sponsors) {
         Decision::Apply
     } else {
         Decision::Review
     };
+    if abroad && !sponsors && decision != Decision::Skip {
+        notes.push(format!(
+            "in {}; visa sponsorship not mentioned, so it needs your OK",
+            job_countries.join(", ")
+        ));
+    }
     if decision == Decision::Skip && skip.is_empty() {
         notes.push(format!(
             "score {total} below review threshold {review_threshold}"
@@ -393,6 +486,62 @@ mod tests {
         j.salary_max = None;
         let m = score(&j, &profile(), 80, 60);
         assert!(m.score < 80, "{m:?}");
+    }
+
+    #[test]
+    fn off_target_junior_and_language_roles_skip() {
+        let p = profile();
+        for (title, why) in [
+            ("AI Support Engineer - Singapore", "role outside"),
+            ("Lead Salesforce Engineer", "role outside"),
+            ("Junior AI Engineer", "too junior"),
+            ("AI Engineer Intern", "too junior"),
+            ("Associate Software Engineer", "too junior"),
+        ] {
+            let mut j = job();
+            j.title = title.into();
+            let m = score(&j, &p, 80, 60);
+            assert_eq!(m.decision, Decision::Skip, "{title}: {m:?}");
+            assert!(m.skip_reasons.iter().any(|r| r.contains(why)), "{title}: {m:?}");
+        }
+        let mut j = job();
+        j.description = Some("Rust Python RAG Kubernetes. Korean speaking is required.".into());
+        let m = score(&j, &p, 80, 60);
+        assert!(m.skip_reasons.iter().any(|r| r.contains("korean")), "{m:?}");
+        // "Associate Manager" is not an entry-level role.
+        let mut j = job();
+        j.title = "Associate Director, AI Engineering".into();
+        assert!(!score(&j, &p, 80, 60).skip_reasons.iter().any(|r| r.contains("junior")));
+    }
+
+    #[test]
+    fn abroad_without_sponsorship_needs_review() {
+        let mut p = profile();
+        p.identity.requires_sponsorship = Some(true);
+        p.identity.willing_to_relocate = Some(true);
+        let mut j = job();
+        j.location = Some("Tokyo, Japan".into());
+        let m = score(&j, &p, 80, 60);
+        assert_eq!(m.decision, Decision::Review, "{m:?}");
+        assert!(m.notes.iter().any(|n| n.contains("sponsorship")));
+        j.description = Some("Rust Python RAG Kubernetes. Visa sponsorship available.".into());
+        assert_eq!(score(&j, &p, 80, 60).decision, Decision::Apply);
+        j.location = Some("Bengaluru".into());
+        j.description = Some("Rust Python RAG Kubernetes".into());
+        assert_eq!(score(&j, &p, 80, 60).decision, Decision::Apply, "India needs no sponsorship");
+    }
+
+    #[test]
+    fn alert_only_jobs_are_neutral_on_skills() {
+        let j = JobDetails {
+            title: "Lead AI Engineer".into(),
+            company: Some("Acme".into()),
+            location: Some("Bengaluru".into()),
+            ..Default::default()
+        };
+        let m = score(&j, &profile(), 80, 60);
+        assert!(m.notes.iter().any(|n| n.contains("skills unknown")));
+        assert_ne!(m.decision, Decision::Skip, "{m:?}");
     }
 
     #[test]

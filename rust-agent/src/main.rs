@@ -5,7 +5,7 @@ use emailhelper::config::{Config, LogFormat};
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str =
-    "emailhelper [serve|migrate|discover-now|reindex|telegram-chats|telegram-test|llm-test|healthcheck|version]
+    "emailhelper [serve|migrate|discover-now|reindex|telegram-chats|telegram-test|llm-test|apply-benchmark|job-digest-now|healthcheck|version]
 
   serve         Run the agent (default)
   migrate       Create/upgrade the SQLite schema and exit
@@ -14,6 +14,8 @@ const USAGE: &str =
   telegram-chats  List chats that messaged the bot (to fill TELEGRAM_CHAT_ID / people.json)
   telegram-test   Check the bot token and send a test message to TELEGRAM_CHAT_ID
   llm-test        Send a one-line test prompt to every configured model provider
+  apply-benchmark [N]  Practice-run the job agent on N real postings (fills forms, never submits)
+  job-digest-now  Send the Telegram digest of jobs to apply to yourself now
   healthcheck   Exit 0 if the running agent reports healthy (for Docker/systemd)
   version       Print the version
 
@@ -144,7 +146,7 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        "reindex" | "discover-now" | "serve" => {
+        "reindex" | "discover-now" | "apply-benchmark" | "job-digest-now" | "serve" => {
             if let Err(e) = ensure_api_token(&mut cfg) {
                 tracing::error!(error = %e, "cannot prepare API token");
                 return ExitCode::FAILURE;
@@ -180,6 +182,45 @@ async fn main() -> ExitCode {
                         }
                     }
                 }
+                "apply-benchmark" => {
+                    let _ = app.knowledge.reindex().await;
+                    let n = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+                    match emailhelper::jobs::benchmark::run(&app, n).await {
+                        Ok(r) => {
+                            let json = serde_json::to_string_pretty(&r).unwrap_or_default();
+                            let dir = std::path::Path::new("data").join("benchmark");
+                            let _ = std::fs::create_dir_all(&dir);
+                            let path = dir.join(format!("apply-benchmark-{}.json", chrono::Local::now().format("%Y%m%d-%H%M")));
+                            let _ = std::fs::write(&path, &json);
+                            let tried = r.runs.len().max(1);
+                            println!(
+                                "
+Alert jobs {} | screened out {} | anonymous company {} | on employer board {} | platform-only {}",
+                                r.replay.alert_jobs, r.replay.screened_out, r.replay.anonymous_company, r.replay.on_employer_board, r.replay.platform_only
+                            );
+                            println!(
+                                "Practice runs {} | no help needed {} ({:.0}%) | needs you {} | blocked {} | errors {}
+Report: {}",
+                                r.runs.len(), r.autonomous, 100.0 * r.autonomous as f64 / tried as f64, r.needs_human, r.blocked, r.errors, path.display()
+                            );
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "benchmark failed");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                "job-digest-now" => match emailhelper::jobs::digest::send(&app).await {
+                    Ok(n) => {
+                        println!("digest sent with {n} job(s)");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "digest failed");
+                        ExitCode::FAILURE
+                    }
+                },
                 _ => serve(app).await,
             }
         }

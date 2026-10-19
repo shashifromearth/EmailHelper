@@ -75,6 +75,8 @@ disabled with a warning.
 | `JOB_REVIEW_THRESHOLD` | `60` | Scores in `[review, auto)` need your approval; below this, the job is skipped. |
 | `JOB_RESUME_PATH` | `$EH_KNOWLEDGE_DIR/resume.pdf` | Resume file to upload. `resume.json.resume_file` takes precedence when it exists. |
 | `JOB_MAX_ATTEMPTS` | `3` | Retries per application step for transient errors. |
+| `JOB_DIGEST_TIME` | `19:00` | Local time of the daily Telegram digest of good matches you must apply to yourself (platform-only jobs). `emailhelper job-digest-now` sends it immediately. |
+| `JOB_DIGEST_MAX` | `15` | Maximum jobs per digest; anything left over is sent the next day, and entries expire after 7 days. |
 | `BROWSER_WORKER_URL` | `http://127.0.0.1:7801` | Browser worker address. |
 | `BROWSER_WORKER_TOKEN` | — | Shared secret (`X-Worker-Token`); must match the worker's value. |
 | `BROWSER_WORKER_TIMEOUT_SECS` | `180` | Timeout per worker call. |

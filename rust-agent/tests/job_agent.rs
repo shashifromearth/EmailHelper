@@ -620,17 +620,6 @@ async fn low_score_jobs_are_skipped_without_applying() {
         "Senior Accountant at Initech",
         "Recommended jobs for you: Senior Accountant https://www.naukri.com/job-listings-senior-accountant-initech-123",
     );
-    // The worker returns an accounting job for this URL.
-    env.worker.reset().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/extract"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "final_url": "https://www.naukri.com/job-listings-senior-accountant-initech-123",
-            "title": "Senior Accountant - Initech", "text": "Onsite in Berlin. SAP, Excel, IFRS. 5 years.",
-            "json_ld": [], "links": []
-        })))
-        .mount(&env.worker)
-        .await;
     env.agent.post("/api/v1/emails", &e).await;
     let job = wait_for("job stored", T, || async {
         env.agent
@@ -653,6 +642,11 @@ async fn low_score_jobs_are_skipped_without_applying() {
         .await
         .unwrap();
     assert!(apps.is_empty(), "no application for skipped job");
+    let reqs = env.worker.received_requests().await.unwrap();
+    assert!(
+        reqs.iter().all(|r| r.url.path() != "/v1/extract"),
+        "Naukri pages are never opened by the agent"
+    );
 }
 
 #[tokio::test]
