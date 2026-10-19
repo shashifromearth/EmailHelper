@@ -207,3 +207,23 @@ describe('misc', () => {
     assert.equal(typeof startMock, 'function');
   });
 });
+
+import { chooseLoose } from '../src/apply.js';
+import { applicationUrl } from '../src/navigation.js';
+
+it('chooseLoose matches wordier options', () => {
+  const opts = [
+    { label: 'Bengkulu, Indonesia', index: 0 },
+    { label: 'Bengaluru, Karnataka, India', index: 1 },
+  ];
+  assert.equal(chooseLoose(opts, 'Bengaluru, India').index, 1);
+  assert.equal(chooseLoose(opts, 'Mumbai'), null);
+  assert.equal(chooseLoose([{ label: 'Yes', index: 0 }, { label: 'No', index: 1 }], 'No').index, 1);
+});
+
+it('applicationUrl points at the form page', () => {
+  assert.equal(applicationUrl('https://jobs.ashbyhq.com/openai/ab12'), 'https://jobs.ashbyhq.com/openai/ab12/application');
+  assert.equal(applicationUrl('https://jobs.ashbyhq.com/openai/ab12/application'), 'https://jobs.ashbyhq.com/openai/ab12/application');
+  assert.equal(applicationUrl('https://jobs.lever.co/acme/123'), 'https://jobs.lever.co/acme/123/apply');
+  assert.equal(applicationUrl('https://job-boards.greenhouse.io/anthropic/jobs/1'), 'https://job-boards.greenhouse.io/anthropic/jobs/1');
+});

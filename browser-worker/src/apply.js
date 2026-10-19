@@ -111,6 +111,74 @@ async function setChecked(loc, want) {
   }
 }
 
+/** In-page: mark the visible options of a combobox's list; returns their labels. */
+function markComboOptions(id) {
+  document.querySelectorAll('[data-eh-choice]').forEach((o) => o.removeAttribute('data-eh-choice'));
+  const el = document.querySelector('[data-eh-field="' + id.replace(/["\\]/g, '\\$&') + '"]');
+  if (!el) return [];
+  const lbId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+  const lb = lbId ? document.getElementById(lbId) : null;
+  const vis = (o) => o.getClientRects().length > 0;
+  const opts = [...(lb || document).querySelectorAll('[role="option"]')].filter((o) => lb || vis(o));
+  return opts.slice(0, 400).map((o, i) => {
+    o.setAttribute('data-eh-choice', String(i));
+    return { label: (o.innerText || o.textContent || '').replace(/\s+/g, ' ').trim(), index: i };
+  });
+}
+
+/** Option matching `want`, also when the list is wordier ("Bengaluru, India" → "Bengaluru, Karnataka, India"). */
+export function chooseLoose(opts, want) {
+  const exact = chooseOption(opts.map((o) => ({ ...o, value: o.label })), want);
+  if (exact) return exact;
+  const words = String(want ?? '').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 3);
+  if (!words.length) return null;
+  return (
+    opts
+      .filter((o) => words.every((w) => o.label.toLowerCase().includes(w)))
+      .sort((a, b) => a.label.length - b.label.length)[0] || null
+  );
+}
+
+/** Read a combobox's choices by opening it (they are not in the DOM until then). */
+export async function readComboOptions(frame, field) {
+  const loc = fieldLoc(frame, field.id).first();
+  try {
+    await loc.click({ timeout: 3000 });
+  } catch {
+    return [];
+  }
+  const opts = (await pollUntil(async () => {
+    const o = await frame.evaluate(markComboOptions, field.id).catch(() => []);
+    return o.length ? o : null;
+  }, { timeoutMs: 1200, intervalMs: 200 })) || [];
+  await frame.page().keyboard.press('Escape').catch(() => {});
+  return opts.map((o) => o.label).filter((t) => t && !/^no options/i.test(t));
+}
+
+async function fillCombo(frame, field, value) {
+  const want = toText(Array.isArray(value) ? value[0] : value).trim();
+  if (!want) return 'no value';
+  const loc = fieldLoc(frame, field.id).first();
+  const tryText = async (text) => {
+    await loc.click({ timeout: 5000 });
+    await loc.fill('').catch(() => {});
+    await loc.pressSequentially(text.slice(0, 40), { delay: 15 }).catch(() => loc.fill(text.slice(0, 40)));
+    return pollUntil(async () => {
+      const opts = await frame.evaluate(markComboOptions, field.id).catch(() => []);
+      return opts.length ? chooseLoose(opts, want) : null;
+    }, { timeoutMs: 3000, intervalMs: 200 });
+  };
+  // Type the answer; search boxes that only know city names get the part before the comma.
+  let pick = await tryText(want);
+  if (!pick && want.includes(',')) pick = await tryText(want.split(',')[0]);
+  if (!pick) {
+    await frame.page().keyboard.press('Escape').catch(() => {});
+    return `no option matching "${want}"`;
+  }
+  await frame.locator(`[data-eh-choice="${pick.index}"]`).first().click({ timeout: 5000 });
+  return null;
+}
+
 async function fillText(loc, text) {
   try {
     await loc.fill(text, { timeout: 5000 });
@@ -145,9 +213,17 @@ async function fillField(frame, field, value) {
     case 'radio': {
       const o = chooseOption(field._opts, Array.isArray(value) ? value[0] : value);
       if (!o) return `no option matching "${toText(value)}" (options: ${field.options.join(' | ')})`;
-      await setChecked(optionLoc(frame, field.id, o.index), true);
+      const target = optionLoc(frame, field.id, o.index);
+      if (field._buttons) {
+        // Yes/No drawn as buttons: click unless already pressed
+        if ((await target.getAttribute('aria-pressed').catch(() => null)) !== 'true') await target.click({ timeout: 5000 });
+        return null;
+      }
+      await setChecked(target, true);
       return null;
     }
+    case 'combobox':
+      return fillCombo(frame, field, value);
     case 'checkbox': {
       if (!field._group) {
         await setChecked(loc, isTruthy(Array.isArray(value) ? value.length > 0 : value));
@@ -335,6 +411,11 @@ export async function inspect(mgr, { session_key, url }, log) {
     let blocker = await detectBlocker(page, { navError, fields: discovery ? fields : null, frame: discovery?.frame });
     if (!blocker && fields.length === 0) {
       blocker = { kind: 'unexpected_form', detail: 'no fillable application form found on the page' };
+    }
+    for (const f of fields) {
+      if (f.type === 'combobox' && (!f.options || f.options.length === 0)) {
+        f.options = await readComboOptions(discovery.frame, f);
+      }
     }
     const finalUrl = pageUrl(page, url);
     const out = { final_url: finalUrl, ats: detectAts(finalUrl, discovery?.markers), fields: fields.map(publicField), blocker };

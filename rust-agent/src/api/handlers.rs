@@ -261,6 +261,7 @@ pub async fn ack_draft(
 // ------------------------------------------------------------- status & dashboard
 
 pub async fn status(State(app): State<Arc<App>>) -> AppResult<Json<Value>> {
+    let research_today = crate::research::discovery::ran_today(&app).await;
     let (processed, counts, depth, dead) = app
         .db
         .call(|c| {
@@ -285,6 +286,8 @@ pub async fn status(State(app): State<Arc<App>>) -> AppResult<Json<Value>> {
         "telegram_enabled": app.notifier.enabled(),
         "job_agent_enabled": app.cfg.jobs.enabled,
         "research_enabled": app.cfg.research.enabled,
+        "research_ran_today": research_today.0,
+        "research_last_run": research_today.1,
         "uptime_secs": app.started_at.elapsed().as_secs(),
     })))
 }

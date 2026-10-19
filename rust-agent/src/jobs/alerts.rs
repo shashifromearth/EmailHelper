@@ -290,6 +290,15 @@ pub fn parse(source: &str, body: &str) -> Vec<AlertJob> {
         _ => Vec::new(),
     };
     jobs.retain(|j| !j.title.trim().is_empty() && j.title.chars().count() <= 150);
+    for j in &mut jobs {
+        // Page chrome, not employers ("LinkedIn", "Sign Up").
+        if j.company.as_deref().is_some_and(|c| {
+            let c = c.trim().to_lowercase();
+            LOGIN_PLATFORMS.contains(&c.as_str()) || ["sign up", "sign in", "join now", "log in"].contains(&c.as_str())
+        }) {
+            j.company = None;
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     jobs.retain(|j| {
         seen.insert(format!(

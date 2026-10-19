@@ -194,6 +194,11 @@ async fn daily_discovery_collects_ranks_stores_and_summarises() {
         .env("RESEARCH_LEVER_BOARDS", "globex")
         .env("RESEARCH_ASHBY_BOARDS", "initech")
         .env("RESEARCH_RSS_FEEDS", &format!("{}/feed.xml", src.uri()))
+        // the classic term-based discovery: no freshness/stack/work-type filters
+        .env("RESEARCH_MAX_AGE_HOURS", "0")
+        .env("RESEARCH_TECH_STACK", "none")
+        .env("RESEARCH_WORK_TYPES", "none")
+        .env("RESEARCH_REQUIRE_REMOTE", "false")
         .env("TELEGRAM_ENABLED", "true")
         .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
         .env("TELEGRAM_CHAT_ID", "1")
@@ -233,7 +238,10 @@ async fn daily_discovery_collects_ranks_stores_and_summarises() {
     // Ranked: the best match comes first.
     assert_eq!(jobs[0].details.title, "Staff AI Engineer");
     assert!(jobs.windows(2).all(|w| w[0].score >= w[1].score));
-    assert!(summary.contains("Top matches"), "{summary}");
+    // the job agent is off in this test: every kept job is listed with its link and why
+    assert!(summary.contains("Not applied — apply yourself if interested"), "{summary}");
+    assert!(summary.contains("Why not: the job agent is off (JOB_AGENT_ENABLED)"), "{summary}");
+    assert!(summary.contains("Why not: relocation required"), "{summary}");
     assert!(summary.contains("Staff AI Engineer"));
     let m = a.metrics().await;
     assert!(metric_sum(&m, "jobs_discovered_total") >= 5.0);
@@ -350,4 +358,58 @@ async fn recruiter_email_triggers_recruiter_discovery_and_outreach_drafts() {
         .await
         .unwrap();
     assert!(findings >= 1, "company research stored");
+}
+
+#[tokio::test]
+async fn remote_boards_keep_only_fresh_india_open_stack_jobs() {
+    let src = MockServer::start().await;
+    let tg = telegram_mock().await;
+    let fresh = (chrono::Utc::now() - chrono::Duration::hours(3)).format("%Y-%m-%dT%H:%M:%S").to_string();
+    let stale = (chrono::Utc::now() - chrono::Duration::hours(40)).format("%Y-%m-%dT%H:%M:%S").to_string();
+    Mock::given(method("GET"))
+        .and(path("/remotive"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jobs": [
+            {"id": 1, "title": "Senior Python Engineer (GenAI)", "company_name": "Askable", "candidate_required_location": "Worldwide",
+             "publication_date": fresh, "job_type": "contract", "url": "https://remotive.com/remote-jobs/1", "description": "Python, LLMs, RAG", "tags": ["python"]},
+            {"id": 2, "title": "Java Backend Developer", "company_name": "Old Co", "candidate_required_location": "Worldwide",
+             "publication_date": stale, "job_type": "full_time", "url": "https://remotive.com/remote-jobs/2", "description": "Java, Spring Boot", "tags": []},
+            {"id": 3, "title": ".NET Engineer", "company_name": "US Co", "candidate_required_location": "USA",
+             "publication_date": fresh, "job_type": "full_time", "url": "https://remotive.com/remote-jobs/3", "description": "C# and .NET", "tags": []},
+            {"id": 4, "title": "Frontend Engineer", "company_name": "UI Co", "candidate_required_location": "Worldwide",
+             "publication_date": fresh, "job_type": "full_time", "url": "https://remotive.com/remote-jobs/4", "description": "React, JavaScript", "tags": []},
+            {"id": 5, "title": "AI Agent Engineer", "company_name": "Anywhere Inc", "candidate_required_location": "Anywhere",
+             "publication_date": fresh, "job_type": "full_time", "url": "https://remotive.com/remote-jobs/5",
+             "description": "Agentic AI with LangGraph. You must be located in the US.", "tags": []},
+            {"id": 6, "title": "C# .NET Consultant", "company_name": "Desi Tech", "candidate_required_location": "India",
+             "publication_date": fresh, "job_type": "contract", "url": "https://remotive.com/remote-jobs/6", "description": "C#, ASP.NET Core, Azure", "tags": []}
+        ]})))
+        .mount(&src)
+        .await;
+    let a = builder()
+        .env("RESEARCH_ENABLED", "true")
+        .env("RESEARCH_REMOTE_BOARDS", "remotive")
+        .env("RESEARCH_REMOTIVE_URL", &format!("{}/remotive", src.uri()))
+        .env("RESEARCH_APPLICANT_COUNTRY", "India")
+        .env("TELEGRAM_ENABLED", "true")
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "1")
+        .env("TELEGRAM_API_BASE", &tg.uri())
+        .start()
+        .await;
+    a.post("/api/v1/research/run", &json!({})).await;
+    let summary = wait_for("discovery summary", T, || async {
+        sent_texts(&tg).await.into_iter().find(|t| t.contains("Daily Job Discovery"))
+    })
+    .await;
+    let jobs = a.app.db.call(|c| jdb::list_jobs(c, 50, None)).await.unwrap();
+    let mut titles: Vec<&str> = jobs.iter().map(|j| j.details.title.as_str()).collect();
+    titles.sort();
+    assert_eq!(titles, vec!["C# .NET Consultant", "Senior Python Engineer (GenAI)"], "{summary}");
+    assert!(summary.contains("posted in the last 25 h"), "{summary}");
+    assert!(summary.contains("1 posted more than 25 h ago"), "{summary}");
+    assert!(summary.contains("https://remotive.com/remote-jobs/1"), "kept jobs are listed with their link: {summary}");
+    assert!(summary.contains("Why not:"), "{summary}");
+    // the three full-time jobs (USA-only, frontend, "located in the US") fail the role-type rule first
+    assert!(summary.contains("3 not a contract / consultant / freelance role"), "{summary}");
+    assert!(summary.contains("remote · contract/freelance/consultant"), "{summary}");
 }

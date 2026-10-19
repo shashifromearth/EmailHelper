@@ -13,6 +13,25 @@ pub struct RawJob {
     pub source: String,
     pub source_ref: Option<String>,
     pub details: JobDetails,
+    /// When the posting was published, if the source says.
+    pub posted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Where applicants may be ("Worldwide", "USA", "India, APAC").
+    pub region: Option<String>,
+    /// full_time / contract / freelance …, as the source labels it.
+    pub employment_type: Option<String>,
+}
+
+impl RawJob {
+    pub fn new(source: impl Into<String>, source_ref: Option<String>, details: JobDetails) -> Self {
+        Self {
+            source: source.into(),
+            source_ref,
+            details,
+            posted_at: None,
+            region: None,
+            employment_type: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------- SearXNG
@@ -74,11 +93,7 @@ pub fn job_from_search(r: &SearchResult) -> Option<RawJob> {
         ..Default::default()
     };
     extract::enrich_from_text(&mut d, &r.content, &[]);
-    Some(RawJob {
-        source: format!("searxng:{}", link.ats),
-        source_ref: Some(r.url.clone()),
-        details: d,
-    })
+    Some(RawJob::new(format!("searxng:{}", link.ats), Some(r.url.clone()), d))
 }
 
 // ---------------------------------------------------------------- RSS / Atom
@@ -88,6 +103,8 @@ pub struct FeedItem {
     pub title: String,
     pub link: String,
     pub description: String,
+    /// pubDate / published / updated, as written in the feed.
+    pub published: Option<String>,
 }
 
 pub fn parse_feed(xml: &str) -> AppResult<Vec<FeedItem>> {
@@ -126,10 +143,15 @@ pub fn parse_feed(xml: &str) -> AppResult<Vec<FeedItem>> {
         if description.is_empty() {
             description = child_text("content");
         }
+        let published = ["pubDate", "published", "updated"]
+            .iter()
+            .map(|t| child_text(t))
+            .find(|t| !t.is_empty());
         items.push(FeedItem {
             title: child_text("title"),
             link,
             description: html_to_text(&description),
+            published,
         });
     }
     Ok(items)
@@ -157,11 +179,12 @@ pub async fn fetch_feed(http: &reqwest::Client, url: &str) -> AppResult<Vec<RawJ
                 ..Default::default()
             };
             extract::enrich_from_text(&mut d, &i.description, &[]);
-            RawJob {
-                source: "rss".into(),
-                source_ref: Some(url.to_string()),
-                details: d,
-            }
+            let mut j = RawJob::new("rss", Some(url.to_string()), d);
+            j.posted_at = i
+                .published
+                .as_deref()
+                .and_then(|p| crate::research::remote_boards::parse_date(&Value::String(p.to_string())));
+            j
         })
         .collect())
 }
@@ -205,11 +228,11 @@ pub fn parse_greenhouse(board: &str, v: &Value) -> Vec<RawJob> {
                     };
                     let loc_text = format!("{} {}", d.location.clone().unwrap_or_default(), desc);
                     extract::enrich_from_text(&mut d, &loc_text, &[]);
-                    Some(RawJob {
-                        source: "greenhouse".into(),
-                        source_ref: j["id"].as_i64().map(|i| format!("{board}:{i}")),
-                        details: d,
-                    })
+                    let mut r = RawJob::new("greenhouse", j["id"].as_i64().map(|i| format!("{board}:{i}")), d);
+                    r.posted_at = crate::research::remote_boards::parse_date(&j["first_published"])
+                        .or_else(|| crate::research::remote_boards::parse_date(&j["updated_at"]));
+                    r.region = r.details.location.clone();
+                    Some(r)
                 })
                 .collect()
         })
@@ -253,11 +276,11 @@ pub fn parse_lever(company: &str, v: &Value) -> Vec<RawJob> {
                         }
                     }
                     extract::enrich_from_text(&mut d, &desc, &[]);
-                    Some(RawJob {
-                        source: "lever".into(),
-                        source_ref: j["id"].as_str().map(|i| format!("{company}:{i}")),
-                        details: d,
-                    })
+                    let mut r = RawJob::new("lever", j["id"].as_str().map(|i| format!("{company}:{i}")), d);
+                    r.posted_at = crate::research::remote_boards::parse_date(&j["createdAt"]);
+                    r.region = r.details.location.clone();
+                    r.employment_type = j["categories"]["commitment"].as_str().map(str::to_string);
+                    Some(r)
                 })
                 .collect()
         })
@@ -303,11 +326,11 @@ pub fn parse_ashby(org: &str, v: &Value) -> Vec<RawJob> {
                         d.salary_currency = cur;
                     }
                     extract::enrich_from_text(&mut d, &desc, &[]);
-                    Some(RawJob {
-                        source: "ashby".into(),
-                        source_ref: j["id"].as_str().map(|i| format!("{org}:{i}")),
-                        details: d,
-                    })
+                    let mut r = RawJob::new("ashby", j["id"].as_str().map(|i| format!("{org}:{i}")), d);
+                    r.posted_at = crate::research::remote_boards::parse_date(&j["publishedAt"]);
+                    r.region = r.details.location.clone();
+                    r.employment_type = j["employmentType"].as_str().map(str::to_string);
+                    Some(r)
                 })
                 .collect()
         })

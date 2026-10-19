@@ -137,6 +137,23 @@ pub fn from_json<T: serde::de::DeserializeOwned + Default>(s: Option<String>) ->
         .unwrap_or_default()
 }
 
+/// A value from the `settings` table.
+pub fn get_setting(c: &rusqlite::Connection, key: &str) -> crate::error::AppResult<Option<String>> {
+    use rusqlite::OptionalExtension;
+    Ok(c.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| r.get(0))
+        .optional()?)
+}
+
+/// Store a value in the `settings` table.
+pub fn set_setting(c: &rusqlite::Connection, key: &str, value: &str) -> crate::error::AppResult<()> {
+    c.execute(
+        "INSERT INTO settings(key, value, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        rusqlite::params![key, value, now()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,3 +211,4 @@ mod tests {
         }
     }
 }
+

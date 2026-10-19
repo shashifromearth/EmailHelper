@@ -38,6 +38,8 @@ export function discoverFields() {
 
   const kindOf = (el) => {
     if (el.tagName === 'SELECT') return 'select';
+    // react-select / autocomplete widgets: choices appear only when opened
+    if (el.tagName === 'INPUT' && el.getAttribute('role') === 'combobox') return 'combobox';
     if (el.tagName === 'TEXTAREA') return 'textarea';
     const t = (el.getAttribute('type') || 'text').toLowerCase();
     if (['text', 'email', 'tel', 'url', 'number', 'date', 'radio', 'checkbox', 'file'].includes(t)) return t;
@@ -108,10 +110,24 @@ export function discoverFields() {
     }
     return '';
   };
+  // Ashby marks required questions with a CSS class on the label, not a "*".
+  const requiredByClass = (el) => {
+    const labels = el.labels ? [...el.labels] : [];
+    const entry = el.closest('[class*="field-entry" i], [data-field-path]');
+    if (entry) labels.push(...entry.querySelectorAll('label, [class*="question-title" i]'));
+    return labels.some((l) => /(^|[\s_-])required/i.test(l.className || ''));
+  };
+  // The question title of the field's own block (Ashby renders it apart from the input).
+  const entryLabel = (el) => {
+    const entry = el.closest('[class*="field-entry" i], [data-field-path]');
+    const t = entry && entry.querySelector('label, [class*="question-title" i]');
+    return t && !t.contains(el) ? textOf(t) : '';
+  };
   const singleLabel = (el, container) =>
     fromLabels(el) ||
     el.getAttribute('aria-label') ||
     fromLabelledBy(el) ||
+    entryLabel(el) ||
     precedingText(el, container) ||
     el.getAttribute('placeholder') ||
     el.getAttribute('name') ||
@@ -147,7 +163,37 @@ export function discoverFields() {
 
   // ---- form discovery ---------------------------------------------------
   const collect = (container) => {
+    // Yes/No questions drawn as two buttons (Ashby); a hidden checkbox next to
+    // them is not the real control.
+    const consumed = new Set();
+    const yesno = [];
+    const btnText = (b) => norm(b.innerText || b.textContent).toLowerCase();
+    const byParent = new Map();
+    for (const b of container.querySelectorAll('button, [role="button"]')) {
+      const t = btnText(b);
+      if (t !== 'yes' && t !== 'no') continue;
+      if (!byParent.has(b.parentElement)) byParent.set(b.parentElement, []);
+      byParent.get(b.parentElement).push(b);
+    }
+    for (const [p, list] of byParent) {
+      const texts = list.map(btnText);
+      if (list.length !== 2 || !texts.includes('yes') || !texts.includes('no') || !visible(list[0])) continue;
+      let entry = p;
+      for (let i = 0; i < 5 && entry.parentElement && entry !== container; i++) {
+        entry = entry.parentElement;
+        if (entry.querySelector('label, legend, [class*="question-title" i]')) break;
+      }
+      entry.querySelectorAll('input[type="checkbox"], input[type="radio"]').forEach((x) => consumed.add(x));
+      const lab = entry.querySelector('label, legend, [class*="question-title" i]');
+      yesno.push({
+        list,
+        entry,
+        raw: lab ? lab.textContent : precedingText(p, container),
+        required: !!(lab && (REQ_RE.test(lab.textContent) || /required/i.test(lab.className || ''))),
+      });
+    }
     const controls = [...container.querySelectorAll('input,select,textarea')]
+      .filter((el) => !consumed.has(el))
       .map((el) => ({ el, kind: kindOf(el) }))
       .filter((c) => c.kind && usable(c.el, c.kind));
     const groups = new Map();
@@ -209,7 +255,7 @@ export function discoverFields() {
         id,
         label: cleanLabel(raw) || id,
         type: c.kind,
-        required: el.required || el.getAttribute('aria-required') === 'true' || REQ_RE.test(raw || ''),
+        required: el.required || el.getAttribute('aria-required') === 'true' || REQ_RE.test(raw || '') || requiredByClass(el),
         options: [],
         _group: false,
         _multiple: false,
@@ -229,6 +275,29 @@ export function discoverFields() {
       }
       fields.push(field);
     }
+    for (const y of yesno) {
+      const base =
+        (y.entry.getAttribute && y.entry.getAttribute('data-field-path')) ||
+        (y.entry.querySelector('[data-field-path]') || {}).getAttribute?.('data-field-path') ||
+        'yesno';
+      const id = assignId(base);
+      const opts = y.list.map((b, i) => ({ label: norm(b.innerText || b.textContent), value: norm(b.innerText || b.textContent), index: i }));
+      y.list.forEach((b, i) => {
+        b.setAttribute(MARK, id);
+        b.setAttribute(OPT, String(i));
+      });
+      fields.push({
+        id,
+        label: cleanLabel(y.raw) || id,
+        type: 'radio',
+        required: y.required,
+        options: opts.map((o) => o.label),
+        _group: true,
+        _multiple: false,
+        _opts: opts,
+        _buttons: true,
+      });
+    }
     return fields;
   };
 
@@ -245,12 +314,13 @@ export function discoverFields() {
 
   let chosen = null;
   for (const [kind, sel] of ATS_SELECTORS) {
+    // Several nodes can match (Ashby's "autofill from resume" box comes
+    // first); the real form is the one with the most fields.
     for (const node of document.querySelectorAll(sel)) {
       const container = node.closest('form') || node;
       const fields = collect(container);
-      if (fields.length > 0) {
+      if (fields.length > 0 && (!chosen || fields.length > chosen.fields.length)) {
         chosen = { container, kind, fields, appLike: true };
-        break;
       }
     }
     if (chosen) break;
@@ -329,7 +399,17 @@ export function readFieldStates(ids) {
     }
     const el = els[0];
     let empty;
-    if (el.tagName === 'SELECT') {
+    if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') {
+      empty = !els.some((b) => b.getAttribute('aria-pressed') === 'true' || /(^|[\s_-])(active|selected)/i.test(b.className || ''));
+    } else if (el.getAttribute('role') === 'combobox') {
+      // the widget's own wrapper: grow while it still holds only this combobox
+      let box = el;
+      for (let i = 0; i < 6 && box.parentElement && box.parentElement.querySelectorAll('[role="combobox"]').length === 1; i++) {
+        box = box.parentElement;
+      }
+      const sv = box.querySelector('[class*="single-value" i], [class*="multi-value" i]');
+      empty = !String(el.value || '').trim() && !(sv && sv.textContent.trim());
+    } else if (el.tagName === 'SELECT') {
       empty = ![...el.selectedOptions].some((o) => o.value !== '');
     } else if (el.type === 'radio' || el.type === 'checkbox') {
       empty = !els.some((e) => e.checked);

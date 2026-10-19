@@ -165,6 +165,24 @@ pub struct ResearchConfig {
     pub recruiter_daily_limit: u32,
     /// Start applications for jobs found by discovery (requires the job agent).
     pub auto_apply: bool,
+    /// Remote-job boards to read (remotive, remoteok, himalayas, jobicy, weworkremotely).
+    pub remote_boards: Vec<String>,
+    /// Endpoint overrides per board (RESEARCH_<BOARD>_URL), mainly for tests.
+    pub remote_board_urls: Vec<(String, String)>,
+    /// Drop postings older than this many hours (None = keep all).
+    pub max_age_hours: Option<u32>,
+    /// Applicants' country; None = the research person's authorized country.
+    pub applicant_country: Option<String>,
+    /// Tech stack a job must mention (empty = use the search terms instead).
+    pub tech_stack: Vec<String>,
+    /// Role types a job must be: contract / freelance / consultant (empty = any).
+    pub work_types: Vec<String>,
+    /// Jobs must be remote (or a distributed team).
+    pub require_remote: bool,
+    /// How often the scheduler checks whether today's discovery has run.
+    pub check_interval_hours: u64,
+    /// Run the daily scheduler (off in tests that trigger runs themselves).
+    pub schedule_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -373,6 +391,30 @@ impl Config {
             recruiter_linkedin_enabled: b("RECRUITER_LINKEDIN_ENABLED", false),
             recruiter_daily_limit: num("RECRUITER_DAILY_LIMIT", 20)? as u32,
             auto_apply: b("RESEARCH_AUTO_APPLY", false),
+            remote_boards: list_or_default(
+                s("RESEARCH_REMOTE_BOARDS"),
+                crate::research::remote_boards::BOARDS,
+            ),
+            remote_board_urls: crate::research::remote_boards::BOARDS
+                .iter()
+                .filter_map(|b| {
+                    let key = format!("RESEARCH_{}_URL", b.to_ascii_uppercase());
+                    s(&key).map(|v| (b.to_string(), v))
+                })
+                .collect(),
+            max_age_hours: match num("RESEARCH_MAX_AGE_HOURS", 25)? {
+                0 => None,
+                h => Some(h as u32),
+            },
+            applicant_country: s("RESEARCH_APPLICANT_COUNTRY"),
+            tech_stack: list_or_default(
+                s("RESEARCH_TECH_STACK"),
+                &["python", "c#", ".net", "java", "genai", "agentic ai"],
+            ),
+            work_types: list_or_default(s("RESEARCH_WORK_TYPES"), &["contract", "freelance", "consultant"]),
+            require_remote: b("RESEARCH_REQUIRE_REMOTE", true),
+            check_interval_hours: num("RESEARCH_CHECK_INTERVAL_HOURS", 4)?.clamp(1, 24),
+            schedule_enabled: b("RESEARCH_SCHEDULE_ENABLED", true),
         };
 
         let max_concurrency = num("EH_MAX_CONCURRENCY", 10)?.clamp(1, 256) as usize;
@@ -420,6 +462,15 @@ pub fn parse_bool(v: &str) -> bool {
 }
 
 /// Split `a;b;c` (or newline/comma separated when no `;` present) into trimmed items.
+/// A list setting: unset → `default`; "none"/"off" → empty.
+fn list_or_default(v: Option<String>, default: &[&str]) -> Vec<String> {
+    match v {
+        None => default.iter().map(|s| s.to_string()).collect(),
+        Some(v) if matches!(v.trim().to_ascii_lowercase().as_str(), "none" | "off" | "-") => Vec::new(),
+        Some(v) => split_list(&v),
+    }
+}
+
 pub fn split_list(v: &str) -> Vec<String> {
     let sep: &[char] = if v.contains(';') {
         &[';', '\n']

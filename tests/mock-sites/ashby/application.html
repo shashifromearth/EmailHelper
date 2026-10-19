@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Applied AI Architect @ Example (Ashby mock)</title>
+  <style>
+    .hidden-input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+    [role=listbox] { border: 1px solid #ccc; }
+    ._active { background: #333; color: #fff; }
+  </style>
+</head>
+<body>
+  <!-- Like Ashby: an "autofill from resume" box comes before the real form. -->
+  <div class="ashby-application-form-autofill-input-root">
+    <p>Autofill from resume</p>
+    <input type="file" class="ashby-application-form-autofill-input">
+  </div>
+
+  <!-- The form is rendered by script after load, as on the real site. -->
+  <div class="ashby-application-form-container" id="root"></div>
+
+  <script>
+    const CITIES = ['Bengaluru, Karnataka, India', 'Bengkulu, Indonesia', 'Berlin, Germany', 'Pune, Maharashtra, India'];
+    function entry(path, label, required, inner) {
+      return `<div class="ashby-application-form-field-entry" data-field-path="${path}">
+        <label class="ashby-application-form-question-title ${required ? '_required_x' : ''}" ${inner.includes('id="' + path + '"') ? `for="${path}"` : ''}>${label}</label>
+        <div>${inner}</div></div>`;
+    }
+    setTimeout(() => {
+      document.getElementById('root').innerHTML =
+        entry('_systemfield_name', 'Legal Name', true, '<input id="_systemfield_name" name="_systemfield_name" type="text" required>') +
+        entry('_systemfield_email', 'Email', true, '<input id="_systemfield_email" name="_systemfield_email" type="email" required>') +
+        entry('_systemfield_resume', 'Resume', true, '<input id="_systemfield_resume" type="file">') +
+        entry('loc', 'Where are you currently located?', true,
+          '<input class="ashby-application-form-input-autocomplete" placeholder="Start typing..." aria-autocomplete="list" aria-expanded="false" aria-haspopup="listbox" role="combobox" aria-controls="loc-list"><div id="loc-list" role="listbox" hidden></div>') +
+        entry('relocate', 'Are you open to relocation?', true,
+          '<div class="yesno"><button type="button" class="ashby-application-form-input-yesno-option" aria-pressed="false">Yes</button><button type="button" class="ashby-application-form-input-yesno-option" aria-pressed="false">No</button></div><input type="checkbox" name="relocate-cb" class="hidden-input" tabindex="-1">') +
+        '<button type="submit" id="submit">Submit Application</button>';
+
+      const combo = document.querySelector('[role=combobox]');
+      const list = document.getElementById('loc-list');
+      combo.addEventListener('input', () => {
+        const q = combo.value.trim().toLowerCase();
+        // Search-as-you-type: nothing until two characters are typed.
+        const hits = q.length < 2 ? [] : CITIES.filter((c) => c.toLowerCase().includes(q));
+        list.innerHTML = hits.map((c, i) => `<div role="option" id="opt-${i}">${c}</div>`).join('');
+        list.hidden = hits.length === 0;
+        combo.setAttribute('aria-expanded', String(!list.hidden));
+      });
+      list.addEventListener('click', (ev) => {
+        const o = ev.target.closest('[role=option]');
+        if (!o) return;
+        combo.value = o.textContent;
+        list.hidden = true;
+        combo.setAttribute('aria-expanded', 'false');
+      });
+      for (const b of document.querySelectorAll('.ashby-application-form-input-yesno-option')) {
+        b.addEventListener('click', () => {
+          for (const x of b.parentElement.children) {
+            x.setAttribute('aria-pressed', String(x === b));
+            x.classList.toggle('_active', x === b);
+          }
+        });
+      }
+    }, 600);
+  </script>
+</body>
+</html>

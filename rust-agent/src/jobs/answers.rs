@@ -415,6 +415,80 @@ fn option_contains_years(opt: &str, years: f64) -> bool {
     }
 }
 
+/// Legal agreements (arbitration, waivers) and employer AI-use policy
+/// statements: always the person's own decision, for every application.
+pub fn is_legal_agreement(label: &str, options: &[String]) -> bool {
+    let text = format!("{} {}", label, options.join(" ")).to_lowercase();
+    [
+        "arbitrat",
+        "waive",
+        "waiver",
+        "class action",
+        "ai policy",
+        "use of ai",
+        "ai-generated",
+        "ai generated",
+        "without ai",
+        "ai assistance",
+        "ai tools",
+        "generative ai policy",
+        // attestations: statements the person makes about themselves
+        "i confirm",
+        "i certify",
+        "i attest",
+        "i have read",
+        "i hereby",
+    ]
+    .iter()
+    .any(|w| text.contains(w))
+}
+
+/// Sponsorship questions that name no country: answer for the job's country
+/// (from the `Location:` line of the job context).
+fn sponsorship_for_job(f: &Field, p: &Profile, job_context: &str) -> Option<Answer> {
+    if !countries_asked(&f.label).is_empty() {
+        return None; // the question names a country: the normal rule applies
+    }
+    let loc = job_context
+        .lines()
+        .find_map(|l| l.strip_prefix("Location:"))
+        .unwrap_or("");
+    let countries = crate::knowledge::profile::countries_in(loc);
+    if countries.is_empty() {
+        return None;
+    }
+    let authorized = p.authorized_countries();
+    if countries.iter().all(|c| authorized.contains(c)) {
+        return Some(yes_no(f, false));
+    }
+    let needs = p
+        .identity
+        .requires_sponsorship
+        .or(p.preferences.visa_sponsorship_required.then_some(true))?;
+    Some(yes_no(f, needs))
+}
+
+/// "Are you authorized to work in the country where the job is located?":
+/// answered for the job's country (the `Location:` line).
+fn authorization_for_job(f: &Field, p: &Profile, job_context: &str) -> Option<Answer> {
+    if !countries_asked(&f.label).is_empty() {
+        return None;
+    }
+    let authorized = p.authorized_countries();
+    if authorized.is_empty() {
+        return None;
+    }
+    let loc = job_context
+        .lines()
+        .find_map(|l| l.strip_prefix("Location:"))
+        .unwrap_or("");
+    let countries = crate::knowledge::profile::countries_in(loc);
+    if countries.is_empty() {
+        return None;
+    }
+    Some(yes_no(f, countries.iter().all(|c| authorized.contains(c))))
+}
+
 /// Questions that must never be guessed by the model.
 pub fn is_sensitive(label: &str) -> bool {
     let l = label.to_lowercase();
@@ -467,6 +541,28 @@ pub async fn answer_field(
     scope: &crate::knowledge::Scope,
     memory_ns: &str,
 ) -> AppResult<Answer> {
+    if is_legal_agreement(&f.label, &f.options) {
+        return Ok(if f.required {
+            Answer::Ask {
+                reason: "legal agreement or employer AI-use policy: your own decision".into(),
+            }
+        } else {
+            Answer::Skip
+        });
+    }
+    if label_has(&f.label.to_lowercase(), &["sponsorship", "sponsor"]) {
+        if let Some(a) = sponsorship_for_job(f, profile, job_context) {
+            return Ok(a);
+        }
+    }
+    if label_has(
+        &f.label.to_lowercase(),
+        &["authorized to work", "authorised to work", "legally authorized", "eligible to work"],
+    ) {
+        if let Some(a) = authorization_for_job(f, profile, job_context) {
+            return Ok(a);
+        }
+    }
     if let Some(a) = from_profile(f, profile) {
         return Ok(a);
     }
@@ -780,5 +876,29 @@ mod tests {
         assert_eq!(match_option(&o, "yes"), Some("Yes, I am".into()));
         assert_eq!(match_option(&o, "no"), Some("No".into()));
         assert_eq!(match_option(&o, "maybe"), None);
+    }
+
+    #[test]
+    fn legal_agreements_and_job_country_sponsorship() {
+        assert!(is_legal_agreement("Agreement to Arbitrate", &[]));
+        assert!(is_legal_agreement("Please confirm", &["I understand and agree to the terms of the Agreement to Arbitrate".into()]));
+        assert!(is_legal_agreement("AI Policy for Application", &[]));
+        assert!(!is_legal_agreement("Why do you want to join Acme?", &[]));
+        assert!(is_legal_agreement("I confirm I have read the above.", &[]));
+
+        let mut p = Profile::default();
+        p.identity.requires_sponsorship = Some(true);
+        p.identity.work_authorization = "Indian citizen, authorized to work in India".into();
+        p.identity.authorized_countries = vec!["India".into()];
+        let yn = ["Yes", "No"];
+        let q = field("q", "Do you require visa sponsorship?", "select", true, &yn);
+        let us = "Engineer at Acme\nLocation: San Francisco, CA | Seattle, WA\n";
+        let india = "Engineer at Acme\nLocation: Bengaluru\n";
+        assert!(matches!(sponsorship_for_job(&q, &p, us), Some(Answer::Value(v)) if v == "Yes"));
+        assert!(matches!(sponsorship_for_job(&q, &p, india), Some(Answer::Value(v)) if v == "No"));
+        assert!(sponsorship_for_job(&q, &p, "Engineer\nLocation: Remote\n").is_none());
+        let auth = field("a", "Are you authorized to work in the country where the job is located?", "radio", true, &yn);
+        assert!(matches!(authorization_for_job(&auth, &p, us), Some(Answer::Value(v)) if v == "No"));
+        assert!(matches!(authorization_for_job(&auth, &p, india), Some(Answer::Value(v)) if v == "Yes"));
     }
 }

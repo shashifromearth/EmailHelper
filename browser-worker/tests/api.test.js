@@ -357,3 +357,54 @@ describe('fill', () => {
     assert.equal(login.body.blocker.kind, 'login_required');
   });
 });
+
+describe('modern ATS widgets', () => {
+  it('ashby: finds the real form behind the autofill box, incl. yes/no buttons and a search combobox', async () => {
+    const url = `${mock.url}/ashby/application.html`;
+    const ins = await w.call('POST', '/v1/apply/inspect', { session_key: 'ashby_widgets', url });
+    assert.equal(ins.status, 200, ins.text);
+    assert.equal(ins.body.blocker, null);
+    const f = byId(ins.body.fields);
+    assert.ok(f._systemfield_name && f._systemfield_email && f._systemfield_resume, JSON.stringify(ins.body.fields));
+    const loc = ins.body.fields.find((x) => x.type === 'combobox');
+    assert.equal(loc.label, 'Where are you currently located?');
+    assert.deepEqual(loc.options, [], 'search box shows nothing until typed');
+    assert.equal(f.relocate.type, 'radio');
+    assert.deepEqual(f.relocate.options, ['Yes', 'No']);
+    assert.ok(!ins.body.fields.some((x) => x.type === 'checkbox'), 'hidden checkbox behind the buttons is not a field');
+
+    const r = await w.call('POST', '/v1/apply/fill', {
+      session_key: 'ashby_widgets',
+      url,
+      answers: {
+        _systemfield_name: 'Asha Example',
+        _systemfield_email: 'asha@example.com',
+        [loc.id]: 'Bengaluru, India',
+        relocate: 'Yes',
+      },
+      submit: false,
+    });
+    assert.equal(r.body.status, 'filled', r.text);
+    assert.deepEqual(r.body.missing_required, ['_systemfield_resume'], JSON.stringify(r.body));
+    assert.deepEqual(r.body.skipped, [], JSON.stringify(r.body.skipped));
+  });
+
+  it('greenhouse new board: reads combobox choices on inspect and picks them on fill', async () => {
+    const url = `${mock.url}/greenhouse/new-board.html`;
+    const ins = await w.call('POST', '/v1/apply/inspect', { session_key: 'gh_new', url });
+    const f = byId(ins.body.fields);
+    assert.equal(f.country.type, 'combobox');
+    assert.deepEqual(f.country.options, ['India', 'Indonesia', 'Ireland', 'United States']);
+    assert.deepEqual(f.question_1.options, ['Yes', 'No']);
+    assert.equal(f.question_1.required, true);
+
+    const r = await w.call('POST', '/v1/apply/fill', {
+      session_key: 'gh_new',
+      url,
+      answers: { first_name: 'Asha', email: 'asha@example.com', country: 'India', question_1: 'Yes' },
+      submit: false,
+    });
+    assert.equal(r.body.status, 'filled', r.text);
+    assert.deepEqual(r.body.missing_required.sort(), ['question_2', 'resume'], JSON.stringify(r.body));
+  });
+});

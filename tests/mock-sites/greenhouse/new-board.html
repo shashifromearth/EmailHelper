@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Job Application for Staff Engineer at Example (new Greenhouse board mock)</title>
+  <style>.select__menu { border: 1px solid #ccc; }</style>
+</head>
+<body>
+  <form id="application-form" class="application--form">
+    <div><label for="first_name">First Name*</label><input id="first_name" type="text" aria-required="true"></div>
+    <div><label for="email">Email*</label><input id="email" type="email" aria-required="true"></div>
+    <div><label for="resume">Resume/CV*</label><input id="resume" type="file"></div>
+
+    <!-- react-select style comboboxes: options render only when opened, the
+         input stays empty and the choice is shown in a single-value div. -->
+    <div class="select" data-options="India|Indonesia|Ireland|United States">
+      <label for="country" id="country-label">Country*</label>
+      <div class="select__control">
+        <div class="select__value-container"><input id="country" class="select__input" role="combobox" aria-required="true" aria-expanded="false" aria-labelledby="country-label"></div>
+      </div>
+    </div>
+    <div class="select" data-options="Yes|No">
+      <label for="question_1" id="q1-label">Are you open to relocation for this role?*</label>
+      <div class="select__control">
+        <div class="select__value-container"><input id="question_1" class="select__input" role="combobox" aria-required="true" aria-expanded="false" aria-labelledby="q1-label"></div>
+      </div>
+    </div>
+    <div class="select" data-options="I understand and agree to the terms of the Agreement to Arbitrate set forth above.">
+      <label for="question_2" id="q2-label">Agreement to Arbitrate*</label>
+      <div class="select__control">
+        <div class="select__value-container"><input id="question_2" class="select__input" role="combobox" aria-required="true" aria-expanded="false" aria-labelledby="q2-label"></div>
+      </div>
+    </div>
+    <button type="submit">Submit application</button>
+  </form>
+  <script>
+    for (const wrap of document.querySelectorAll('.select')) {
+      const input = wrap.querySelector('input');
+      const opts = wrap.dataset.options.split('|');
+      const id = input.id;
+      let menu = null;
+      const close = () => {
+        if (menu) menu.remove();
+        menu = null;
+        input.setAttribute('aria-expanded', 'false');
+        input.removeAttribute('aria-controls');
+      };
+      const open = () => {
+        close();
+        const q = input.value.trim().toLowerCase();
+        const shown = opts.filter((o) => !q || o.toLowerCase().includes(q));
+        menu = document.createElement('div');
+        menu.className = 'select__menu';
+        menu.id = `react-select-${id}-listbox`;
+        menu.setAttribute('role', 'listbox');
+        menu.innerHTML = shown.length
+          ? shown.map((o, i) => `<div role="option" class="select__option" id="react-select-${id}-option-${i}">${o}</div>`).join('')
+          : '<div class="select__menu-notice">No options</div>';
+        wrap.appendChild(menu);
+        input.setAttribute('aria-expanded', 'true');
+        input.setAttribute('aria-controls', menu.id);
+        menu.addEventListener('mousedown', (ev) => {
+          const o = ev.target.closest('[role=option]');
+          if (!o) return;
+          ev.preventDefault();
+          let sv = wrap.querySelector('.select__single-value');
+          if (!sv) {
+            sv = document.createElement('div');
+            sv.className = 'select__single-value';
+            wrap.querySelector('.select__value-container').prepend(sv);
+          }
+          sv.textContent = o.textContent;
+          input.value = '';
+          close();
+        });
+      };
+      input.addEventListener('mousedown', open);
+      input.addEventListener('input', open);
+      input.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+    }
+  </script>
+</body>
+</html>

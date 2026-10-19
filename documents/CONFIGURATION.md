@@ -91,7 +91,9 @@ Browser worker settings (read by `browser-worker/`): `BROWSER_WORKER_HOST`,
 | Variable | Default | Description |
 |---|---|---|
 | `RESEARCH_ENABLED` | `false` | Turns on the daily discovery scheduler. |
-| `RESEARCH_DAILY_TIME` | `07:30` | Local time (HH:MM). |
+| `RESEARCH_CHECK_INTERVAL_HOURS` | `4` | Discovery runs once per day. At startup and then every this many hours the agent checks whether today's run has happened (`research.last_run_date` in the `settings` table, shown as `research_ran_today` in `GET /api/v1/status`) and runs it immediately if not. |
+| `RESEARCH_SCHEDULE_ENABLED` | `true` | Turn the daily check off (runs can still be started with `POST /api/v1/research/run`). |
+| `RESEARCH_DAILY_TIME` | `07:30` | No longer used by discovery (kept for compatibility). |
 | `SEARXNG_URL` | — | SearXNG base URL. The JSON output format must be enabled. |
 | `RESEARCH_SEARCH_TERMS` | the 7 terms from the brief | Separated by `;`. Generic words (remote, jobs, India) are ignored when matching titles. |
 | `RESEARCH_RSS_FEEDS` | — | `;`-separated feed URLs. |
@@ -99,6 +101,12 @@ Browser worker settings (read by `browser-worker/`): `BROWSER_WORKER_HOST`,
 | `RESEARCH_CAREER_PAGES` | — | Career page URLs, opened through the browser worker. |
 | `RESEARCH_MAX_RESULTS_PER_QUERY` | `20` | Maximum SearXNG results per query. |
 | `RESEARCH_SUMMARY_TOP_N` | `10` | Number of jobs in the Telegram summary. |
+| `RESEARCH_REMOTE_BOARDS` | `remotive;remoteok;himalayas;jobicy;weworkremotely` | Remote-job boards read once a day through their public APIs/feeds (`none` turns them off). `RESEARCH_<BOARD>_URL` overrides an endpoint. |
+| `RESEARCH_MAX_AGE_HOURS` | `25` | Only postings published within this many hours are kept; postings without a date are dropped. `0` keeps everything. |
+| `RESEARCH_APPLICANT_COUNTRY` | first authorized country in the research person's profile | Jobs must be in this country or open to applicants from it ("Worldwide", "APAC", "India"). Jobs limited to other regions, or whose description says "US only", "must be located in the US", "EU only" and similar, are dropped. |
+| `RESEARCH_REQUIRE_REMOTE` | `true` | A kept job must be remote (or a distributed team). |
+| `RESEARCH_WORK_TYPES` | `contract;freelance;consultant` | A kept job must be one of these role types, judged from the board's employment type, the title/tags and clear phrases such as "contract role" or "independent consultant" (`none` = full-time roles too). |
+| `RESEARCH_TECH_STACK` | `python;c#;.net;java;genai;agentic ai` | A kept job must mention one of these (synonyms included: Django/FastAPI, ASP.NET, Spring, LLM/RAG/LangChain, LangGraph/multi-agent). `none` falls back to `RESEARCH_SEARCH_TERMS` matching titles. |
 | `RESEARCH_AUTO_APPLY` | `false` | Start applications for discovered jobs that aren't skipped (needs `JOB_AGENT_ENABLED`). Jobs from your own mail are handled by the job agent regardless. |
 | `RECRUITER_DISCOVERY_ENABLED` | `false` | Finds recruiters for recruiting or job emails. |
 | `RECRUITER_LINKEDIN_ENABLED` | `false` | LinkedIn people search through your logged-in worker profile. |

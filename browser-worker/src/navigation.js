@@ -18,6 +18,26 @@ export function pageUrl(page, fallback) {
   return isHttpUrl(u) ? u : fallback;
 }
 
+/**
+ * The page that holds the application form: Ashby and Lever show the job
+ * description at /<org>/<id> and the form at …/application and …/apply.
+ */
+export function applicationUrl(url) {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (/(^|\.)jobs\.ashbyhq\.com$/i.test(u.hostname) && parts.length === 2) {
+      u.pathname = `/${parts[0]}/${parts[1]}/application`;
+      return u.toString();
+    }
+    if (/(^|\.)jobs(\.eu)?\.lever\.co$/i.test(u.hostname) && parts.length === 2) {
+      u.pathname = `/${parts[0]}/${parts[1]}/apply`;
+      return u.toString();
+    }
+  } catch {}
+  return url;
+}
+
 export async function navigate(page, url, cfg) {
   try {
     const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: cfg.navTimeoutMs });
@@ -81,18 +101,19 @@ export function detectAts(url, markers = {}) {
  */
 export async function openApplication(mgr, entry, url, log) {
   const cfg = mgr.cfg;
-  const nav = await navigate(entry.page, url, cfg);
+  const nav = await navigate(entry.page, applicationUrl(url), cfg);
   entry.url = url;
   if (nav.error) return { navError: nav.error, discovery: null };
   await settle(entry.page, cfg);
 
   let d = await discoverAll(entry.page);
-  if (!d.appLike && !d.apply && !d.controlCount) {
-    // client-rendered forms (SPAs) may show up a little later
+  if (!d.apply && (!d.appLike || d.fields.length < 3)) {
+    // client-rendered forms (SPAs) may show up a little later, sometimes
+    // after a small block such as "autofill from resume"
     d = (await pollUntil(async () => {
       const x = await discoverAll(entry.page);
-      return x.appLike || x.apply ? x : null;
-    }, { timeoutMs: 3000, intervalMs: 500 })) || d;
+      return (x.appLike && x.fields.length >= 3) || x.apply ? x : null;
+    }, { timeoutMs: 6000, intervalMs: 500 })) || d;
   }
   if (!d.appLike && d.apply) {
     log.info('following apply control', { session_key: entry.key, text: d.apply.text });

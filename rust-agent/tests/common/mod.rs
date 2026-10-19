@@ -83,6 +83,10 @@ impl Builder {
             ("EH_BIND_ADDR".into(), "127.0.0.1:0".into()),
             ("MODEL_MODE".into(), "MOCK".into()),
             ("EH_MAX_RETRIES".into(), "1".into()),
+            // Tests never reach the real remote-job boards.
+            ("RESEARCH_REMOTE_BOARDS".into(), "none".into()),
+            // tests trigger discovery runs themselves
+            ("RESEARCH_SCHEDULE_ENABLED".into(), "false".into()),
         ]);
         env.extend(self.env);
         let cfg = Config::from_lookup(|k| env.get(k).cloned()).expect("config");

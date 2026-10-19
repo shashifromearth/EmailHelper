@@ -117,6 +117,21 @@ pub trait LlmProvider: Send + Sync {
     async fn health(&self) -> bool;
 }
 
+/// Retries of a provider that answers 429/503 before falling back.
+const BUSY_RETRIES: u32 = 2;
+
+/// "Please try again in 3.42s" (Groq) / "Please retry in 1.3s" (Gemini) / "500ms".
+pub fn retry_after(body: &str) -> Option<std::time::Duration> {
+    static R: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = R.get_or_init(|| {
+        regex::Regex::new(r"(?i)(?:try again|retry) in ([0-9]+(?:\.[0-9]+)?)\s*(ms|s)").expect("valid regex")
+    });
+    let c = re.captures(body)?;
+    let n: f64 = c[1].parse().ok()?;
+    let secs = if c[2].eq_ignore_ascii_case("ms") { n / 1000.0 } else { n };
+    Some(std::time::Duration::from_secs_f64(secs.max(0.0)))
+}
+
 pub struct LlmRouter {
     primary: Arc<dyn LlmProvider>,
     /// Tried in order when the primary fails.
@@ -273,7 +288,30 @@ impl LlmRouter {
         self.primary.health().await
     }
 
+    /// One provider call; a "busy" answer (429/503) is retried after the wait
+    /// the provider asks for, so a short rate limit doesn't fail the task.
     async fn call(&self, p: &Arc<dyn LlmProvider>, req: &LlmRequest) -> Result<String, LlmError> {
+        let mut attempt = 0;
+        loop {
+            let res = self.call_once(p, req).await;
+            match &res {
+                Err(LlmError::Status { status, body, .. })
+                    if (*status == 429 || *status == 503) && attempt < BUSY_RETRIES =>
+                {
+                    let wait = retry_after(body)
+                        .unwrap_or(std::time::Duration::from_secs(2))
+                        .min(std::time::Duration::from_secs(25))
+                        + std::time::Duration::from_millis(300);
+                    tracing::info!(provider = p.name(), status, wait_ms = wait.as_millis() as u64, "LLM busy; retrying");
+                    tokio::time::sleep(wait).await;
+                    attempt += 1;
+                }
+                _ => return res,
+            }
+        }
+    }
+
+    async fn call_once(&self, p: &Arc<dyn LlmProvider>, req: &LlmRequest) -> Result<String, LlmError> {
         // Wait for a slot first; queueing time doesn't count towards the timeout.
         let _permit = match &self.gate {
             Some(g) => g.clone().acquire_owned().await.ok(),
@@ -488,6 +526,14 @@ mod tests {
         let r = LlmRouter::from_config(&cfg.llm, reqwest::Client::new(), Arc::new(Metrics::new()));
         assert_eq!(r.provider_name(), "ollama");
         assert!(r.fallback_names().is_empty());
+    }
+
+    #[test]
+    fn parses_retry_hints() {
+        assert_eq!(retry_after("Please try again in 3.42s. Need more"), Some(std::time::Duration::from_millis(3420)));
+        assert_eq!(retry_after("Please retry in 58.33s."), Some(std::time::Duration::from_millis(58330)));
+        assert_eq!(retry_after("try again in 500ms"), Some(std::time::Duration::from_millis(500)));
+        assert_eq!(retry_after("overloaded"), None);
     }
 
     #[test]

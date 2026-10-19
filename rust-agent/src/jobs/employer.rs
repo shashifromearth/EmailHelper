@@ -98,10 +98,46 @@ pub fn location_compatible(alert: Option<&str>, job: &JobDetails) -> bool {
     ca.iter().any(|c| cj.contains(c))
 }
 
+/// Legal-form and country words that don't identify a company.
+const LEGAL: &[&str] = &[
+    "pvt", "private", "ltd", "limited", "inc", "llc", "llp", "corp", "corporation", "co", "company", "plc", "gmbh",
+    "india",
+];
+/// First words too common to identify a company on their own.
+const GENERIC: &[&str] = &[
+    "applied", "digital", "global", "data", "cloud", "smart", "tech", "first", "united", "general", "national",
+    "prime", "alpha", "next", "open", "future", "modern", "quantum", "infinite", "bright", "blue", "green",
+];
+
+/// Does a posting belong to `company`? Its text must name the company: the
+/// full name, or a distinctive first word ("Valtech" for "Valtech India Systems").
+pub fn belongs_to(company: &str, d: &JobDetails) -> bool {
+    let text = format!(
+        "{} {}",
+        d.company.as_deref().unwrap_or(""),
+        d.description.as_deref().unwrap_or("")
+    )
+    .to_lowercase();
+    if d.description.as_deref().unwrap_or("").trim().is_empty() {
+        return false;
+    }
+    let w: Vec<String> = words(company).into_iter().filter(|x| !LEGAL.contains(&x.as_str())).collect();
+    if w.is_empty() {
+        return false;
+    }
+    let phrase = w.join(" ");
+    if crate::jobs::extract::contains_word(&text, &phrase) {
+        return true;
+    }
+    let first = &w[0];
+    first.len() >= 5 && !GENERIC.contains(&first.as_str()) && crate::jobs::extract::contains_word(&text, first)
+}
+
 /// Pick the posting on a board that is the alert's job.
 pub fn best_match(alert: &AlertJob, jobs: Vec<RawJob>) -> Option<RawJob> {
     jobs.into_iter()
         .filter(|j| location_compatible(alert.location.as_deref(), &j.details))
+        .filter(|j| alert.company.as_deref().is_none_or(|c| belongs_to(c, &j.details)))
         .map(|j| (title_similarity(&alert.title, &j.details.title), j))
         .filter(|(s, _)| *s >= TITLE_MATCH)
         .max_by(|a, b| a.0.total_cmp(&b.0))
@@ -212,15 +248,30 @@ mod tests {
     }
 
     fn raw(title: &str, loc: &str) -> RawJob {
-        RawJob {
-            source: "greenhouse".into(),
-            source_ref: None,
-            details: JobDetails {
+        RawJob::new(
+            "greenhouse",
+            None,
+            JobDetails {
                 title: title.into(),
                 location: Some(loc.into()),
+                description: Some("Join Acme to build AI systems.".into()),
                 ..Default::default()
             },
-        }
+        )
+    }
+
+    #[test]
+    fn board_must_name_the_company() {
+        let d = |desc: &str| JobDetails {
+            title: "Engineer".into(),
+            description: Some(desc.into()),
+            ..Default::default()
+        };
+        assert!(!belongs_to("Applied Systems", &d("Applied Intuition builds autonomy software.")));
+        assert!(belongs_to("Applied Systems", &d("At Applied Systems we build insurance software.")));
+        assert!(belongs_to("Valtech India Systems", &d("Valtech is a global agency.")));
+        assert!(belongs_to("Beacon Holdings", &d("Beacon is hiring.")));
+        assert!(!belongs_to("Beacon Holdings", &JobDetails { title: "x".into(), ..Default::default() }), "no text, no proof");
     }
 
     #[test]

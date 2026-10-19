@@ -45,7 +45,7 @@ pub async fn start_background(app: &Arc<App>) -> AppResult<Background> {
     if let Some(h) = telegram::bot::spawn(app.clone()) {
         handles.push(h);
     }
-    if app.cfg.research.enabled {
+    if app.cfg.research.enabled && app.cfg.research.schedule_enabled {
         handles.push(research::discovery::spawn_scheduler(app.clone()));
     }
     if app.cfg.jobs.enabled {

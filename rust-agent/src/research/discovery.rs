@@ -22,6 +22,21 @@ pub struct DiscoveryReport {
     pub new_jobs: usize,
     pub errors: Vec<String>,
     pub top: Vec<(String, String, i64, String)>,
+    /// Why collected jobs were left out, with counts.
+    pub dropped: std::collections::BTreeMap<String, usize>,
+    /// Applications started for new matches.
+    pub applying: usize,
+}
+
+/// Group drop reasons ("only for applicants in USA" → "only for applicants elsewhere").
+fn drop_kind(reason: &str) -> String {
+    if reason.starts_with("posted more than") {
+        reason.to_string()
+    } else if reason.starts_with("only for applicants") || reason.starts_with("description says") {
+        "not open to applicants in your country".into()
+    } else {
+        reason.to_string()
+    }
 }
 
 /// Does a job title match any search term? Generic words ("remote", "jobs",
@@ -142,11 +157,36 @@ async fn collect(app: &App, report: &mut DiscoveryReport) -> Vec<RawJob> {
                                 url: Some(link.url),
                                 ..Default::default()
                             },
+                            // a career page gives no date or region
+                            posted_at: None,
+                            region: None,
+                            employment_type: None,
                         });
                     }
                 }
             }
             Err(e) => report.errors.push(format!("career page {page_url}: {e}")),
+        }
+    }
+    // Aggregators last: when the same job is on the employer's own board,
+    // that version (its real location and date) is the one judged.
+    for board in &r.remote_boards {
+        let urls: Vec<String> = match r.remote_board_urls.iter().find(|(b, _)| b == board) {
+            Some((_, u)) => vec![u.clone()],
+            None => crate::research::remote_boards::default_urls(board)
+                .iter()
+                .map(|u| u.to_string())
+                .collect(),
+        };
+        let mut seen_urls = std::collections::HashSet::new();
+        for url in urls {
+            match crate::research::remote_boards::fetch(&app.http, board, &url).await {
+                Ok(jobs) => out.extend(
+                    jobs.into_iter()
+                        .filter(|j| seen_urls.insert(j.details.url.clone().unwrap_or_default())),
+                ),
+                Err(e) => report.errors.push(format!("{board} {url}: {e}")),
+            }
         }
     }
     report.collected = out.len();
@@ -161,11 +201,43 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
     // Discovery scores jobs for one person (people.json `research_person`).
     let research_person = app.knowledge.people().research_person();
     let terms = &app.cfg.research.search_terms;
+    let rc = &app.cfg.research;
+    let criteria = crate::research::filters::Criteria {
+        max_age_hours: rc.max_age_hours,
+        country: rc
+            .applicant_country
+            .clone()
+            .or_else(|| research_person.profile.authorized_countries().first().map(|c| c.to_string()))
+            .unwrap_or_else(|| "India".into()),
+        stack: rc.tech_stack.clone(),
+        work_types: rc.work_types.clone(),
+        require_remote: rc.require_remote,
+    };
+    let now = chrono::Utc::now();
+    let mut seen = std::collections::HashSet::new();
+    let mut kept = Vec::new();
+    for j in raw {
+        // The same job is often on several boards.
+        let key = format!(
+            "{}|{}",
+            j.details.title.to_lowercase(),
+            j.details.company.as_deref().unwrap_or("").to_lowercase()
+        );
+        if !seen.insert(key) {
+            *report.dropped.entry("duplicate on another board".into()).or_default() += 1;
+            continue;
+        }
+        if criteria.stack.is_empty() && !matches_terms(&j.details.title, terms) {
+            *report.dropped.entry("does not match the search terms".into()).or_default() += 1;
+            continue;
+        }
+        match crate::research::filters::check(&j, &criteria, now) {
+            Ok(_) => kept.push(j),
+            Err(reason) => *report.dropped.entry(drop_kind(&reason)).or_default() += 1,
+        }
+    }
     let mut scored: Vec<(jdb::JobRecord, Decision)> = Vec::new();
-    for j in raw
-        .into_iter()
-        .filter(|j| matches_terms(&j.details.title, terms))
-    {
+    for j in kept {
         report.relevant += 1;
         let src = j.source.split(':').next().unwrap_or("research").to_string();
         match crate::jobs::score_and_store(
@@ -207,14 +279,40 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
         .collect();
 
     // Discovered jobs are only applied to when explicitly enabled: they come
-    // from the open web rather than from mail addressed to the user.
-    if app.cfg.jobs.enabled && app.cfg.research.auto_apply {
-        for (rec, _) in scored.iter().filter(|(_, d)| *d != Decision::Skip) {
-            if let Some(u) = rec.details.url.clone() {
-                if let Err(e) = crate::jobs::application::start(app, rec, &u).await {
+    // from the open web rather than from mail addressed to the user. Every
+    // kept job ends up either applying or in the summary with the reason.
+    let mut applying: Vec<(&jdb::JobRecord, Option<&'static str>)> = Vec::new();
+    let mut not_applied: Vec<(&jdb::JobRecord, String)> = Vec::new();
+    for (rec, d) in &scored {
+        let why: Option<String> = if *d == Decision::Skip {
+            Some(if rec.decision_reasons.is_empty() {
+                "did not pass the match rules".to_string()
+            } else {
+                rec.decision_reasons.join("; ")
+            })
+        } else if !app.cfg.jobs.enabled {
+            Some("the job agent is off (JOB_AGENT_ENABLED)".into())
+        } else if !app.cfg.research.auto_apply {
+            Some("automatic applying is off (RESEARCH_AUTO_APPLY)".into())
+        } else if rec.details.url.is_none() {
+            Some("no application link".into())
+        } else {
+            let u = rec.details.url.clone().unwrap_or_default();
+            match crate::jobs::application::start(app, rec, &u).await {
+                Ok(_) => {
+                    report.applying += 1;
+                    let note = (*d == Decision::Review).then_some("needs your OK on Telegram first");
+                    applying.push((rec, note));
+                    None
+                }
+                Err(e) => {
                     report.errors.push(format!("application start: {e}"));
+                    Some(format!("could not start the application: {e}"))
                 }
             }
+        };
+        if let Some(w) = why {
+            not_applied.push((rec, w));
         }
     }
 
@@ -229,6 +327,21 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
         .research_runs_total
         .with_label_values(&[status])
         .inc();
+    if status != "error" {
+        // Today's discovery is done; the scheduler won't run it again today.
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let at = crate::db::now();
+        if let Err(e) = app
+            .db
+            .call(move |c| {
+                crate::db::set_setting(c, LAST_RUN_DATE, &today)?;
+                crate::db::set_setting(c, LAST_RUN_AT, &at)
+            })
+            .await
+        {
+            tracing::warn!(error = %e, "could not record research run");
+        }
+    }
     app.metrics
         .processing_duration_seconds
         .with_label_values(&["research"])
@@ -236,22 +349,62 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
     app.audit("research", "discovery_run", "research", "daily", json!({ "collected": report.collected, "relevant": report.relevant, "new": report.new_jobs, "errors": report.errors })).await;
 
     let mut text = format!(
-        "🔎 Daily Job Discovery\nCollected: {} · Relevant: {} · New: {}\n",
+        "🔎 Daily Job Discovery\nCollected: {} · Kept: {} · New: {}\n",
         report.collected, report.relevant, report.new_jobs
     );
-    if report.top.is_empty() {
+    if rc.max_age_hours.is_some() || !rc.work_types.is_empty() || rc.require_remote {
+        text.push_str(&format!(
+            "Filters: posted in the last {} h · open to applicants in {} · {}{} · {}\n",
+            rc.max_age_hours.map(|h| h.to_string()).unwrap_or_else(|| "∞".into()),
+            criteria.country,
+            if rc.require_remote { "remote · " } else { "" },
+            if rc.work_types.is_empty() { "any role type".to_string() } else { rc.work_types.join("/") },
+            if rc.tech_stack.is_empty() { "search terms".to_string() } else { rc.tech_stack.join(", ") },
+        ));
+    }
+    if !report.dropped.is_empty() {
+        let parts: Vec<String> = report.dropped.iter().map(|(k, n)| format!("{n} {k}")).collect();
+        text.push_str(&format!("Left out: {}\n", parts.join("; ")));
+    }
+    // Keep the message inside Telegram's limit.
+    const MAX_LISTED: usize = 12;
+    let line = |i: usize, r: &jdb::JobRecord| {
+        format!(
+            "{}. [{}] {} — {}\n   {}\n",
+            i + 1,
+            r.score.unwrap_or(0),
+            r.details.title,
+            r.details.company.as_deref().unwrap_or("-"),
+            r.details.url.as_deref().unwrap_or("(no link)")
+        )
+    };
+    if scored.is_empty() {
         text.push_str("\nNo new matching jobs today.");
-    } else {
-        text.push_str("\nTop matches:\n");
-        for (i, (title, company, score, url)) in report.top.iter().enumerate() {
-            text.push_str(&format!(
-                "{}. [{}] {} — {}\n   {}\n",
-                i + 1,
-                score,
-                title,
-                company,
-                url
-            ));
+    }
+    if !applying.is_empty() {
+        text.push_str(&format!("\n🤖 Applying now ({}):\n", applying.len()));
+        for (i, (r, note)) in applying.iter().take(MAX_LISTED).enumerate() {
+            text.push_str(&line(i, r));
+            if let Some(n) = note {
+                text.push_str(&format!("   ({n})\n"));
+            }
+        }
+        if applying.len() > MAX_LISTED {
+            text.push_str(&format!("…and {} more (see the dashboard)\n", applying.len() - MAX_LISTED));
+        }
+        text.push_str("If an application gets stuck you'll get a message with the link and the reason.\n");
+    }
+    if !not_applied.is_empty() {
+        text.push_str(&format!(
+            "\n📝 Not applied — apply yourself if interested ({}):\n",
+            not_applied.len()
+        ));
+        for (i, (r, why)) in not_applied.iter().take(MAX_LISTED).enumerate() {
+            text.push_str(&line(i, r));
+            text.push_str(&format!("   Why not: {why}\n"));
+        }
+        if not_applied.len() > MAX_LISTED {
+            text.push_str(&format!("…and {} more (see the dashboard)\n", not_applied.len() - MAX_LISTED));
         }
     }
     if !report.errors.is_empty() {
@@ -288,26 +441,44 @@ pub fn until_next(at: NaiveTime, now: chrono::DateTime<Local>) -> std::time::Dur
 }
 
 /// Daily scheduler: sleeps until the configured time, then queues a run.
-/// Queuing (instead of running inline) makes the run durable and retryable.
+/// Settings keys: local date ("2026-10-20") and time of the last successful run.
+pub const LAST_RUN_DATE: &str = "research.last_run_date";
+pub const LAST_RUN_AT: &str = "research.last_run_at";
+
+/// (ran today?, last run date) for the status API and the scheduler.
+pub async fn ran_today(app: &App) -> (bool, Option<String>) {
+    let last = app
+        .db
+        .call(|c| crate::db::get_setting(c, LAST_RUN_DATE))
+        .await
+        .ok()
+        .flatten();
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    (last.as_deref() == Some(today.as_str()), last)
+}
+
+/// Check now and then every `RESEARCH_CHECK_INTERVAL_HOURS`: if today's
+/// discovery hasn't run yet, queue it (queued work is durable and retried;
+/// the per-day key stops a second run while one is waiting).
 pub fn spawn_scheduler(app: Arc<App>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let every = std::time::Duration::from_secs(app.cfg.research.check_interval_hours * 3600);
         loop {
-            let wait = until_next(app.cfg.research.daily_time, Local::now());
-            tracing::info!(
-                in_secs = wait.as_secs(),
-                "next research discovery scheduled"
-            );
-            tokio::time::sleep(wait).await;
-            let key = format!("research:{}", Local::now().format("%Y-%m-%d"));
-            if let Err(e) = app
-                .queue
-                .enqueue(crate::queue::KIND_RESEARCH, key, None, None, 2)
-                .await
-            {
-                tracing::error!(error = %e, "failed to queue research run");
+            let (done, last) = ran_today(&app).await;
+            if done {
+                tracing::info!(last_run = ?last, "research discovery already ran today");
+            } else {
+                let key = format!("research:{}", Local::now().format("%Y-%m-%d"));
+                tracing::info!(last_run = ?last, "research discovery has not run today; running now");
+                if let Err(e) = app
+                    .queue
+                    .enqueue(crate::queue::KIND_RESEARCH, key, None, None, 2)
+                    .await
+                {
+                    tracing::error!(error = %e, "failed to queue research run");
+                }
             }
-            // Avoid double-firing within the same minute.
-            tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+            tokio::time::sleep(every).await;
         }
     })
 }

@@ -44,12 +44,37 @@ pub struct JobRecord {
 }
 
 /// Stable identity for a job: normalised URL, else company + title.
+/// A job URL without tracking parameters. Other query parameters are kept:
+/// on many career sites (`job?gh_jid=123`) they are the job's identity.
+pub fn canonical_url(u: &str) -> String {
+    let no_frag = u.split('#').next().unwrap_or(u);
+    let (base, query) = no_frag.split_once('?').unwrap_or((no_frag, ""));
+    let mut keep: Vec<String> = query
+        .split('&')
+        .filter(|kv| !kv.is_empty())
+        .filter(|kv| {
+            let k = kv.split('=').next().unwrap_or("").to_ascii_lowercase();
+            !(k.starts_with("utm_")
+                || matches!(
+                    k.as_str(),
+                    "gh_src" | "src" | "source" | "ref" | "refid" | "trk" | "trackingid" | "lipi" | "fbclid" | "gclid"
+                        | "mc_cid" | "mc_eid" | "lever-source" | "lever-origin"
+                ))
+        })
+        .map(str::to_string)
+        .collect();
+    keep.sort();
+    let base = base.trim_end_matches('/').to_ascii_lowercase();
+    if keep.is_empty() {
+        base
+    } else {
+        format!("{base}?{}", keep.join("&"))
+    }
+}
+
 pub fn fingerprint(d: &JobDetails) -> String {
     let basis = match &d.url {
-        Some(u) if !u.is_empty() => {
-            let u = u.split(['?', '#']).next().unwrap_or(u);
-            u.trim_end_matches('/').to_ascii_lowercase()
-        }
+        Some(u) if !u.is_empty() => canonical_url(u),
         _ => format!(
             "{}|{}",
             d.company.as_deref().unwrap_or("").to_lowercase().trim(),
@@ -870,6 +895,20 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(fingerprint(&a), fingerprint(&b));
+    }
+
+    #[test]
+    fn query_ids_keep_jobs_apart() {
+        let job = |u: &str| JobDetails {
+            title: "X".into(),
+            url: Some(u.into()),
+            ..Default::default()
+        };
+        let a = job("https://databricks.com/company/careers/open-positions/job?gh_jid=8829033002");
+        let b = job("https://databricks.com/company/careers/open-positions/job?gh_jid=8876613002");
+        assert_ne!(fingerprint(&a), fingerprint(&b), "different jobs on one career page");
+        let c = job("https://databricks.com/company/careers/open-positions/job?utm_source=x&gh_jid=8876613002");
+        assert_eq!(fingerprint(&b), fingerprint(&c), "tracking parameters are ignored");
     }
 
     #[test]

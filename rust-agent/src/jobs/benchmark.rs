@@ -184,9 +184,10 @@ async fn dry_run(app: &Arc<App>, person: &Person, d: &JobDetails, score: u8, dec
         let scope = crate::knowledge::Scope::for_person(person, Some(crate::knowledge::people::JOB_SEEKING));
         let memory_ns = if person.rel_dir.is_empty() { String::new() } else { format!("{}:", person.id) };
         let job_ctx = format!(
-            "{} at {}\n{}",
+            "{} at {}\nLocation: {}\n{}",
             d.title,
             d.company.as_deref().unwrap_or(""),
+            d.location.as_deref().unwrap_or(""),
             d.description.as_deref().unwrap_or("")
         );
         let mut answers_map: Map<String, Value> = Map::new();

@@ -278,9 +278,10 @@ pub async fn run(app: &Arc<App>, id: &str) -> AppResult<()> {
         crate::knowledge::Scope::for_person(&person, Some(crate::knowledge::people::JOB_SEEKING));
     let memory_ns = memory_ns(&person);
     let job_ctx = format!(
-        "{} at {}\n{}",
+        "{} at {}\nLocation: {}\n{}",
         job.details.title,
         job.details.company.as_deref().unwrap_or(""),
+        job.details.location.as_deref().unwrap_or(""),
         job.details.description.as_deref().unwrap_or("")
     );
     let mut answers: Map<String, Value> = a.answers.clone();
@@ -827,7 +828,7 @@ async fn handle_blocker(
         )
     } else {
         format!(
-            "{}: {}. Fix it and reply \"done\", or reply \"skip\".",
+            "{}: {}. Fix it and reply \"done\", reply \"skip\", or apply yourself using the link above.",
             b.kind, b.detail
         )
     };
