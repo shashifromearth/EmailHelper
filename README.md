@@ -27,6 +27,7 @@ Thunderbird ─► MailExtension ─► Rust orchestrator (127.0.0.1:7800) ─�
 
 ```bash
 cp .env.example .env                       # set EH_API_TOKEN (32+ random chars)
+cp -r knowledge.example knowledge          # then replace with your own profile (git-ignored)
 cargo build --release -p emailhelper
 ollama pull qwen2.5:7b                      # or set MODEL_MODE=MOCK to try without a model
 ./target/release/emailhelper serve
@@ -44,6 +45,7 @@ same token in the extension options. Full steps are in
 | [INSTALL.md](documents/INSTALL.md) | Installation (Windows, Linux, Docker), Thunderbird, Telegram, worker |
 | [ARCHITECTURE.md](documents/ARCHITECTURE.md) | Components, workflows, state machine, data model, reliability |
 | [API.md](documents/API.md) | REST API, browser worker API, Telegram protocol, knowledge files |
+| [KNOWLEDGE.md](documents/KNOWLEDGE.md) | People, mailboxes and purposes, private facts, resumes per tech stack, Telegram setup |
 | [CONFIGURATION.md](documents/CONFIGURATION.md) | Every environment variable, with examples |
 | [MONITORING.md](documents/MONITORING.md) | Health endpoints, metrics, Prometheus, Grafana, logs |
 | [SECURITY.md](documents/SECURITY.md) | Threat model, controls, residual risks |
@@ -65,7 +67,8 @@ rust-agent/            Rust orchestrator (axum API, durable queue, agents, LLM r
 thunderbird-extension/ MailExtension (new-mail detection, draft saving, popup, options)
 browser-worker/        Node + Playwright service (extract, inspect, fill, upload, submit, LinkedIn)
 tests/mock-sites/      Mock Greenhouse / Lever / career portal / blocked pages for Playwright tests
-knowledge/             Your profile JSON, tone, company profile, approved responses
+knowledge.example/     Sample profile JSON, tone, company profile, approved responses (copy to knowledge/)
+knowledge/             Your own profile and resume (git-ignored, never committed)
 documents/             Documentation
 docker/ monitoring/ deploy/   Compose, Prometheus/Grafana, systemd & Windows deployment
 scripts/               Test and helper scripts

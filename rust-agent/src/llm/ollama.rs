@@ -8,14 +8,24 @@ pub struct OllamaProvider {
     http: reqwest::Client,
     base: String,
     model: String,
+    num_ctx: u32,
+    keep_alive: String,
 }
 
 impl OllamaProvider {
-    pub fn new(http: reqwest::Client, base: &str, model: &str) -> Self {
+    pub fn new(
+        http: reqwest::Client,
+        base: &str,
+        model: &str,
+        num_ctx: u32,
+        keep_alive: &str,
+    ) -> Self {
         Self {
             http,
             base: base.trim_end_matches('/').to_string(),
             model: model.to_string(),
+            num_ctx,
+            keep_alive: keep_alive.to_string(),
         }
     }
     fn err(&self, message: impl ToString) -> LlmError {
@@ -43,8 +53,8 @@ impl LlmProvider for OllamaProvider {
                 { "role": "system", "content": req.system },
                 { "role": "user", "content": req.prompt }
             ],
-            "options": { "temperature": req.temperature, "num_predict": req.max_tokens },
-            "keep_alive": "10m"
+            "options": { "temperature": req.temperature, "num_predict": req.max_tokens, "num_ctx": self.num_ctx },
+            "keep_alive": self.keep_alive
         });
         if req.json {
             body["format"] = json!("json");

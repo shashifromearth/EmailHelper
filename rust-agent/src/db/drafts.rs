@@ -24,6 +24,9 @@ pub struct NewDraft {
     pub confidence: Option<f32>,
     pub llm_provider: Option<String>,
     pub llm_model: Option<String>,
+    /// Mailbox the reply must be sent from (the one that received the email).
+    pub from_address: Option<String>,
+    pub person_id: Option<String>,
 }
 
 /// Wire shape returned by `GET /api/v1/drafts/pending` (see documents/API.md).
@@ -39,6 +42,7 @@ pub struct PendingDraft {
     pub body: String,
     pub validation: String,
     pub notes: Vec<String>,
+    pub from_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,8 +66,8 @@ pub fn insert(c: &Connection, d: &NewDraft) -> AppResult<String> {
     c.execute(
         "INSERT INTO drafts (id, email_id, kind, account_id, tb_message_id, message_id, to_addrs,
             subject, body, validation, notes, confidence, status, llm_provider, llm_model,
-            created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'pending',?13,?14,?15,?15)",
+            created_at, updated_at, from_address, person_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'pending',?13,?14,?15,?15,?16,?17)",
         params![
             id,
             d.email_id,
@@ -80,6 +84,8 @@ pub fn insert(c: &Connection, d: &NewDraft) -> AppResult<String> {
             d.llm_provider,
             d.llm_model,
             ts,
+            d.from_address,
+            d.person_id,
         ],
     )?;
     Ok(id)
@@ -97,6 +103,7 @@ fn map_pending(r: &Row<'_>) -> rusqlite::Result<PendingDraft> {
         body: r.get(7)?,
         validation: r.get(8)?,
         notes: from_json(r.get(9)?),
+        from_address: r.get(10)?,
     })
 }
 
@@ -109,7 +116,7 @@ pub fn claim_pending(c: &mut Connection, limit: usize) -> AppResult<Vec<PendingD
     let drafts = {
         let mut stmt = tx.prepare(
             "SELECT id, kind, account_id, tb_message_id, message_id, to_addrs, subject, body,
-                    validation, notes
+                    validation, notes, from_address
              FROM drafts
              WHERE status='pending' OR (status='delivered' AND delivered_at < ?1)
              ORDER BY created_at LIMIT ?2",

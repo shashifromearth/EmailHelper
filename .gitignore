@@ -7,4 +7,7 @@ browser-worker/test-results/
 *.db
 *.db-wal
 *.db-shm
-knowledge/resume.pdf
+/knowledge/
+knowledge/*.pdf
+knowledge/*.doc
+knowledge/*.docx

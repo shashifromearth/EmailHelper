@@ -52,10 +52,11 @@ pub async fn generate(
     kb: &KnowledgeBase,
     job: &JobDetails,
     p: &Profile,
+    scope: &crate::knowledge::Scope,
 ) -> String {
     let query = format!("{} {}", job.title, job.skills.join(" "));
     let mut evidence = String::new();
-    for sn in kb.search(&query, 5).await.unwrap_or_default() {
+    for sn in kb.search_scoped(&query, 5, scope).await.unwrap_or_default() {
         if sn.path.contains("projects")
             || sn.path.contains("employment")
             || sn.path.contains("resume")

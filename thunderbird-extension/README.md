@@ -104,19 +104,27 @@ it backs off 5 s → 10 s → 20 s → 40 s → 60 s, and resets after the first
 For each draft, one at a time (a mutex makes sure only one compose window is open):
 
 1. `kind = "reply"`: the extension checks that `tb_message_id` still points to the message
-   with the draft's `message_id`, or finds it again by Message-ID. Then it calls
+   with the draft's `message_id` **in the draft's `account_id`**, or finds it again by
+   Message-ID in that same account. Then it calls
    `compose.beginReply(id, "replyToSender", …)`, so Thunderbird sets `In-Reply-To` and
    `References` and keeps the thread intact.
-   `kind = "new"`: `compose.beginNew({ to, subject, identityId, … })` with the default
-   identity of `account_id`.
-2. The body format follows the identity. HTML identities (`composeHtml`) get an escaped
+   `kind = "new"`: `compose.beginNew({ to, subject, identityId, … })`.
+2. **The reply always comes from the mailbox that received the email.** The sender is the
+   identity of `account_id` whose address equals the draft's `from_address`
+   (case-insensitive), or the account's default identity when `from_address` is null or
+   not an identity of that account (a warning is logged). For replies it is set
+   explicitly with `setComposeDetails({ identityId })` instead of leaving the choice to
+   Thunderbird. Identities of other accounts are never used. When the same mail was
+   BCC'd to several mailboxes, copies in other accounts are never used as the reply
+   target. If the account has no copy, the draft is acked `failed`.
+3. The body format follows the identity. HTML identities (`composeHtml`) get an escaped
    HTML `body`. Plain-text identities get `plainTextBody`. If the window opens in the other
    format, the body is rewritten with `setComposeDetails`.
-3. `validation = "REVIEW_REQUIRED"` adds this first line:
+4. `validation = "REVIEW_REQUIRED"` adds this first line:
    `[EmailHelper: REVIEW REQUIRED – <notes joined by "; ">]`.
-4. `compose.saveMessage(tabId, { mode: "draft" })` (retried once), then the compose window
+5. `compose.saveMessage(tabId, { mode: "draft" })` (retried once), then the compose window
    is closed.
-5. `POST /api/v1/drafts/{id}/ack` sends `{status:"saved", tb_draft_message_id}` or
+6. `POST /api/v1/drafts/{id}/ack` sends `{status:"saved", tb_draft_message_id}` or
    `{status:"failed", error}`. Acks that cannot be delivered are kept in `storage.local`
    and retried before the next poll. Saved draft ids are remembered, so a draft that the
    backend hands out again (after a lost ack) is re-acked instead of being saved twice.
@@ -126,7 +134,7 @@ For each draft, one at a time (a mutex makes sure only one compose window is ope
 | Permission | Why |
 |---|---|
 | `messagesRead` | `onNewMailReceived`, `getFull`, `listAttachments`, `list`/`query` to find the message to reply to. |
-| `accountsRead` | Account names, types and identities (account id, e-mail, account type, default identity for new drafts). |
+| `accountsRead` | Account names, types and identities (account id, e-mail, account type, sender identity for drafts). |
 | `compose` | Open reply and new-message compose windows. |
 | `compose.save` | Save the compose window as a draft. |
 | `storage` | Settings, outbox, dedupe set and status in `storage.local`. |

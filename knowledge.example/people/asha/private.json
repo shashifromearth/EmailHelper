@@ -1,0 +1,14 @@
+{
+  "date_of_birth": "",
+  "pan": "",
+  "aadhaar": "",
+  "address": "",
+  "passport": "",
+  "share": {
+    "date_of_birth": "on_request",
+    "address": "on_request",
+    "pan": "secure_channel",
+    "aadhaar": "secure_channel",
+    "passport": "secure_channel"
+  }
+}

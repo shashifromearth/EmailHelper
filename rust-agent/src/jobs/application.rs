@@ -25,6 +25,7 @@ use crate::error::{AppError, AppResult};
 use crate::jobs::answers::{self, Answer};
 use crate::jobs::browser::{Blocker, Field};
 use crate::jobs::cover_letter;
+use crate::knowledge::Person;
 use crate::queue;
 use crate::telegram::{format, Event};
 
@@ -33,8 +34,36 @@ pub const FIELD_BLOCKER: &str = "__blocker__";
 
 const TERMINAL: &[&str] = &["submitted", "skipped", "failed"];
 
+/// Why the profile can't be used for real applications, if it can't.
+pub fn profile_problem(p: &crate::knowledge::Profile) -> Option<String> {
+    let email = p.identity.email.trim().to_ascii_lowercase();
+    if p.identity.full_name.trim().is_empty() || email.is_empty() {
+        return Some("profile.json is missing your name or email".into());
+    }
+    let domain = email.rsplit('@').next().unwrap_or("");
+    if ["example.com", "example.org", "example.net"].contains(&domain) {
+        return Some("knowledge/ still contains the sample profile; replace it with your own before applying".into());
+    }
+    None
+}
+
+/// The person an application/job belongs to.
+fn person_for(app: &App, person_id: Option<&str>) -> AppResult<Arc<Person>> {
+    crate::jobs::person_by_id(app, person_id).ok_or_else(|| {
+        AppError::Validation(format!(
+            "person {} is not in knowledge/people.json",
+            person_id.unwrap_or("-")
+        ))
+    })
+}
+
 /// Create (or reuse) the application for a job and queue it.
 pub async fn start(app: &Arc<App>, job: &JobRecord, url: &str) -> AppResult<String> {
+    let person = person_for(app, job.person_id.as_deref())?;
+    if let Some(problem) = profile_problem(&person.profile) {
+        tracing::warn!(job_id = %job.id, reason = %problem, "not starting application");
+        return Err(AppError::Validation(problem));
+    }
     let (job2, url2) = (job.clone(), url.to_string());
     let (id, created) = app
         .db
@@ -143,6 +172,25 @@ pub async fn run(app: &Arc<App>, id: &str) -> AppResult<()> {
     }
     let jid = a.job_id.clone();
     let job = app.db.call(move |c| jdb::get_job(c, &jid)).await?;
+    let person = person_for(app, a.person_id.as_deref().or(job.person_id.as_deref()))?;
+    let resume = choose_resume(app, &person, &job);
+    if let Some(name) = &resume.file_name {
+        if a.resume_file.as_deref() != Some(name.as_str()) {
+            let (id2, n2) = (id.to_string(), name.clone());
+            app.db
+                .call(move |c| {
+                    jdb::update_application(
+                        c,
+                        &id2,
+                        &AppUpdate {
+                            resume_file: Some(&n2),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .await?;
+        }
+    }
     let Some(browser) = app.browser.clone() else {
         return Err(AppError::other(
             "browser worker is not configured (JOB_AGENT_ENABLED / BROWSER_WORKER_URL)",
@@ -166,7 +214,14 @@ pub async fn run(app: &Arc<App>, id: &str) -> AppResult<()> {
 
     // Approval gate for mid-score jobs before touching the site.
     if decision == "review" && !a.approved && mode != SubmitMode::DryRun {
-        ask_approval(app, &a, &job, "Score is in the review band").await?;
+        ask_approval(
+            app,
+            &a,
+            &job,
+            "Score is in the review band",
+            &resume.describe(),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -218,7 +273,10 @@ pub async fn run(app: &Arc<App>, id: &str) -> AppResult<()> {
     }
 
     // 2. Answer fields (persisting partial answers as we go).
-    let profile = app.knowledge.profile();
+    let profile = person.profile.clone();
+    let scope =
+        crate::knowledge::Scope::for_person(&person, Some(crate::knowledge::people::JOB_SEEKING));
+    let memory_ns = memory_ns(&person);
     let job_ctx = format!(
         "{} at {}\n{}",
         job.details.title,
@@ -233,14 +291,23 @@ pub async fn run(app: &Arc<App>, id: &str) -> AppResult<()> {
         if answers.get(&f.id).is_some_and(|v| !v.is_null() && v != "") {
             continue;
         }
-        let ans =
-            answers::answer_field(f, &profile, &app.db, &app.knowledge, &app.llm, &job_ctx).await?;
+        let ans = answers::answer_field(
+            f,
+            &profile,
+            &app.db,
+            &app.knowledge,
+            &app.llm,
+            &job_ctx,
+            &scope,
+            &memory_ns,
+        )
+        .await?;
         match ans {
             Answer::Value(v) => {
                 answers.insert(f.id.clone(), v);
             }
             Answer::ResumeFile => {
-                let path = resume_path(app);
+                let path = resume.path.clone();
                 if !path.exists() {
                     return handle_blocker(
                         app,
@@ -258,8 +325,14 @@ pub async fn run(app: &Arc<App>, id: &str) -> AppResult<()> {
             Answer::CoverLetter => {
                 if cover.is_none() {
                     cover = Some(
-                        cover_letter::generate(&app.llm, &app.knowledge, &job.details, &profile)
-                            .await,
+                        cover_letter::generate(
+                            &app.llm,
+                            &app.knowledge,
+                            &job.details,
+                            &profile,
+                            &scope,
+                        )
+                        .await,
                     );
                 }
                 answers.insert(
@@ -403,14 +476,20 @@ pub async fn run(app: &Arc<App>, id: &str) -> AppResult<()> {
                         "screenshot": shot }),
             )
             .await;
+            let (tag, chat) = who(app, &a);
             app.notifier
-                .notify(
+                .notify_person(
+                    chat,
                     Event::ApplicationSubmitted,
-                    &format::submitted(
-                        job.details.company.as_deref().unwrap_or("-"),
-                        &job.details.title,
-                        &a.url,
-                        job.score,
+                    &format!(
+                        "{tag}\n{}\nResume: {}",
+                        format::submitted(
+                            job.details.company.as_deref().unwrap_or("-"),
+                            &job.details.title,
+                            &a.url,
+                            job.score,
+                        ),
+                        resume.file_name.as_deref().unwrap_or("-")
                     ),
                 )
                 .await;
@@ -450,8 +529,9 @@ pub async fn run(app: &Arc<App>, id: &str) -> AppResult<()> {
                     json!({ "answers": answers, "files": files }),
                 )
                 .await;
+                let (tag, chat) = who(app, &a);
                 app.notifier
-                    .notify(Event::ApprovalRequired, &format!("🧪 Dry run: form filled (not submitted)\nCompany: {}\nRole: {}\nURL: {}", job.details.company.as_deref().unwrap_or("-"), job.details.title, a.url))
+                    .notify_person(chat, Event::ApprovalRequired, &format!("{tag}\n🧪 Dry run: form filled (not submitted)\nCompany: {}\nRole: {}\nURL: {}", job.details.company.as_deref().unwrap_or("-"), job.details.title, a.url))
                     .await;
                 Ok(())
             } else {
@@ -460,7 +540,14 @@ pub async fn run(app: &Arc<App>, id: &str) -> AppResult<()> {
                     approved: false,
                     ..a.clone()
                 };
-                ask_approval(app, &a2, &job, "Form filled and validated; ready to submit").await
+                ask_approval(
+                    app,
+                    &a2,
+                    &job,
+                    "Form filled and validated; ready to submit",
+                    &resume.describe(),
+                )
+                .await
             }
         }
         other => {
@@ -475,21 +562,85 @@ pub async fn run(app: &Arc<App>, id: &str) -> AppResult<()> {
     }
 }
 
-fn resume_path(app: &App) -> std::path::PathBuf {
-    let p = app.knowledge.profile();
+/// The resume chosen for an application and why.
+struct ResumeChoice {
+    path: std::path::PathBuf,
+    file_name: Option<String>,
+    matched: Vec<String>,
+}
+
+impl ResumeChoice {
+    fn describe(&self) -> String {
+        match (&self.file_name, self.matched.is_empty()) {
+            (Some(f), false) => format!("Resume: {f} (matched {})", self.matched.join(", ")),
+            (Some(f), true) => format!("Resume: {f} (default)"),
+            (None, _) => String::new(),
+        }
+    }
+}
+
+/// Pick the person's resume whose tech stack best matches the job, falling
+/// back to `resume.json`'s file and then `JOB_RESUME_PATH`.
+fn choose_resume(app: &App, person: &Person, job: &JobRecord) -> ResumeChoice {
+    let mut vocab = person.profile.all_skills();
+    for r in &person.resumes {
+        for t in r.name_tags.iter().chain(r.tags.iter()) {
+            if !vocab.iter().any(|v| v.eq_ignore_ascii_case(t)) {
+                vocab.push(t.clone());
+            }
+        }
+    }
+    let mut d = job.details.clone();
+    let text = format!("{}\n{}", d.title, d.description.clone().unwrap_or_default());
+    crate::jobs::extract::enrich_from_text(&mut d, &text, &vocab);
+    if let Some((r, matched)) = person.select_resume(&d.skills, Some(crate::knowledge::people::JOB_SEEKING)) {
+        return ResumeChoice {
+            path: std::fs::canonicalize(&r.path).unwrap_or_else(|_| r.path.clone()),
+            file_name: Some(r.file_name.clone()),
+            matched,
+        };
+    }
+    let p = &person.profile;
     if !p.resume.resume_file.is_empty() {
         let candidate = std::path::PathBuf::from(&p.resume.resume_file);
         let resolved = if candidate.is_absolute() {
             candidate
         } else {
-            app.knowledge.dir().join(candidate)
+            person.dir.join(candidate)
         };
         if resolved.exists() {
-            return std::fs::canonicalize(&resolved).unwrap_or(resolved);
+            return ResumeChoice {
+                file_name: resolved
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string()),
+                path: std::fs::canonicalize(&resolved).unwrap_or(resolved),
+                matched: Vec::new(),
+            };
         }
     }
     let p = app.cfg.jobs.resume_path.clone();
-    std::fs::canonicalize(&p).unwrap_or(p)
+    ResumeChoice {
+        file_name: p.file_name().map(|n| n.to_string_lossy().to_string()),
+        path: std::fs::canonicalize(&p).unwrap_or(p),
+        matched: Vec::new(),
+    }
+}
+
+/// Namespace for remembered form answers ("" in legacy single-person mode).
+fn memory_ns(person: &Person) -> String {
+    if person.rel_dir.is_empty() {
+        String::new()
+    } else {
+        format!("{}:", person.id)
+    }
+}
+
+/// Telegram tag and chat for an application's person.
+fn who(app: &App, a: &ApplicationRecord) -> (String, Option<i64>) {
+    match crate::jobs::person_by_id(app, a.person_id.as_deref()) {
+        Some(p) => (format::person_tag(&p.name, None), p.telegram_chat_id),
+        None => (String::new(), None),
+    }
 }
 
 async fn create_and_send_question(
@@ -524,7 +675,17 @@ async fn create_and_send_question(
         if !options.is_empty() {
             text.push_str(&format!("\nOptions: {}", options.join(" | ")));
         }
-        if let Some(mid) = app.notifier.notify(Event::ApplicationBlocked, &text).await {
+        let (tag, chat) = who(app, a);
+        let text = if tag.is_empty() {
+            text
+        } else {
+            format!("{tag}\n{text}")
+        };
+        if let Some(mid) = app
+            .notifier
+            .notify_person(chat, Event::ApplicationBlocked, &text)
+            .await
+        {
             let qid = hq.id.clone();
             app.db
                 .call(move |c| jdb::set_question_telegram_id(c, &qid, mid))
@@ -580,6 +741,7 @@ async fn ask_approval(
     a: &ApplicationRecord,
     job: &JobRecord,
     why: &str,
+    resume_note: &str,
 ) -> AppResult<()> {
     let q = format!(
         "{why}. Score {}/100. Reply \"submit\" to apply or \"skip\".",
@@ -601,15 +763,25 @@ async fn ask_approval(
         .await?;
     if created {
         let text = format!(
-            "🟡 Approval Required\nCompany: {}\nRole: {}\nURL: {}\nScore: {}\nReasons: {}\nRef: {}\n\nReply \"submit\" to apply or \"skip\".",
+            "{}🟡 Approval Required\nCompany: {}\nRole: {}\nURL: {}\nScore: {}\nReasons: {}\n{}\nRef: {}\n\nReply \"submit\" to apply or \"skip\".",
+            {
+                let (tag, _) = who(app, a);
+                if tag.is_empty() { tag } else { format!("{tag}\n") }
+            },
             job.details.company.as_deref().unwrap_or("-"),
             job.details.title,
             a.url,
             job.score.unwrap_or(0),
             if job.decision_reasons.is_empty() { "-".to_string() } else { job.decision_reasons.join("; ") },
+            resume_note,
             hq.ref_code
         );
-        if let Some(mid) = app.notifier.notify(Event::ApprovalRequired, &text).await {
+        let (_, chat) = who(app, a);
+        if let Some(mid) = app
+            .notifier
+            .notify_person(chat, Event::ApprovalRequired, &text)
+            .await
+        {
             let qid = hq.id.clone();
             app.db
                 .call(move |c| jdb::set_question_telegram_id(c, &qid, mid))
@@ -707,6 +879,30 @@ pub async fn handle_human_answer(
         .await?
     {
         return Ok(format!("{} was already answered.", q.ref_code));
+    }
+    // A fact about a person (notice period, CTC, …) asked while drafting a
+    // reply: store it so future drafts can answer it directly.
+    if let Some(rest) = q.field_id.as_deref().and_then(|f| f.strip_prefix("fact:")) {
+        let (person_id, fact) = rest.split_once(':').unwrap_or((rest, ""));
+        if fact.is_empty() || answer.eq_ignore_ascii_case("skip") {
+            return Ok("Okay, skipped.".into());
+        }
+        let (pid, f, v) = (person_id.to_string(), fact.to_string(), answer.clone());
+        app.db
+            .call(move |c| jdb::set_person_fact(c, &pid, &f, &v, "telegram"))
+            .await?;
+        app.audit(
+            "human",
+            "fact_recorded",
+            "person",
+            person_id,
+            json!({ "ref": q.ref_code, "fact": fact }),
+        )
+        .await;
+        return Ok(format!(
+            "Thanks, saved. Future drafts will use this for {}.",
+            fact.replace('_', " ")
+        ));
     }
     let Some(app_id) = q.application_id.clone() else {
         return Ok("Recorded.".into());
@@ -816,7 +1012,13 @@ pub async fn handle_human_answer(
                             ..Default::default()
                         },
                     )?;
-                    jdb::remember_answer(c, &question, &v2)
+                    // Remembered per person, so family members' answers never mix.
+                    let ns = a
+                        .person_id
+                        .as_deref()
+                        .map(|p| format!("{p}:"))
+                        .unwrap_or_default();
+                    jdb::remember_answer(c, &format!("{ns}{question}"), &v2)
                 })
                 .await?;
         }

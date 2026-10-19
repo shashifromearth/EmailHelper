@@ -11,6 +11,7 @@ import {
   textToHtml,
   createMutex,
   resolveReplyMessageId,
+  resolveSenderIdentity,
   SAVED_DRAFTS_KEY,
   PENDING_ACKS_KEY,
 } from "../src/drafts.js";
@@ -68,15 +69,17 @@ function fakeApi({ ackFails = 0, ackError = null } = {}) {
 
 function makeProcessor({ messenger, api = fakeApi(), storage = new MemoryStorage(), notified = [] } = {}) {
   const events = [];
+  const logs = [];
   const p = new DraftProcessor({
     api,
     messenger,
     storage,
     sleep: noSleep,
+    log: (level, msg) => logs.push({ level, msg }),
     notify: async (d) => notified.push(d.subject),
     onEvent: (e) => events.push(e),
   });
-  return { p, api, storage, events, notified };
+  return { p, api, storage, events, notified, logs };
 }
 
 describe("draft body", () => {
@@ -293,6 +296,172 @@ describe("DraftProcessor", () => {
       throw new Error("x");
     }));
     assert.equal(await m.run(async () => 42), 42);
+  });
+});
+
+describe("multi-mailbox: replies come from the mailbox that received the mail", () => {
+  const MID = "CAF=abc@mail.gmail.com";
+  const inbox = (id, accountId, extra = {}) => ({ id, headerMessageId: MID, folder: { accountId, type: "inbox", path: "/INBOX" }, ...extra });
+  const mom = { id: "id7", email: "mom@family.org", composeHtml: true };
+  const aliasPlain = { id: "id3b", email: "Alias@Family.org", composeHtml: false };
+
+  test("BCC copy only in another account: draft fails, no reply from the other mailbox", async () => {
+    const messenger = fakeMessenger({
+      identities: { account3: htmlIdentity, account7: mom },
+      messages: { 1234: inbox(1234, "account7"), 4321: inbox(4321, "account7") },
+    });
+    const { p, api, events } = makeProcessor({ messenger });
+    const r = await p.process(replyDraft());
+    assert.equal(r.status, "failed");
+    assert.equal(messenger.find("compose.beginReply").length, 0);
+    assert.equal(messenger.find("compose.beginNew").length, 0);
+    assert.equal(api.acks[0].body.status, "failed");
+    assert.match(api.acks[0].body.error, /original message not found in account account3/);
+    assert.match(api.acks[0].body.error, /account7/);
+    assert.equal(events[0].type, "draft_failed");
+  });
+
+  test("same-account copy found by Message-ID query is used, other-account copies ignored", async () => {
+    const messenger = fakeMessenger({
+      identities: { account3: htmlIdentity, account7: mom },
+      messages: { 500: inbox(500, "account7"), 600: inbox(600, "account3"), 700: inbox(700, "account9") },
+    });
+    const { p } = makeProcessor({ messenger });
+    const r = await p.process(replyDraft({ tb_message_id: null }));
+    assert.equal(r.status, "saved");
+    assert.equal(messenger.find("compose.beginReply")[0].args[0], 600);
+  });
+
+  test("same-account copy in a skipped folder is used only when no usable same-account copy exists", async () => {
+    const sent = { id: 610, headerMessageId: MID, folder: { accountId: "account3", type: "sent", path: "/Sent" } };
+    const messenger = fakeMessenger({ messages: { 500: inbox(500, "account7"), 610: sent } });
+    assert.equal(await resolveReplyMessageId(messenger, replyDraft({ tb_message_id: null })), 610);
+  });
+
+  test("tb_message_id pointing at another account's copy is not used; falls back to the same-account copy", async () => {
+    const messenger = fakeMessenger({
+      identities: { account3: htmlIdentity, account7: mom },
+      messages: { 1234: inbox(1234, "account7"), 600: inbox(600, "account3") },
+    });
+    assert.equal(await resolveReplyMessageId(messenger, replyDraft()), 600);
+    assert.deepEqual(messenger.find("messages.get")[0].args, [1234]);
+    assert.equal(messenger.find("messages.query").length, 1);
+
+    const { p } = makeProcessor({ messenger });
+    await p.process(replyDraft());
+    assert.equal(messenger.find("compose.beginReply")[0].args[0], 600);
+  });
+
+  test("reply: from_address matching a non-default identity is set via setComposeDetails and decides the format", async () => {
+    const messenger = fakeMessenger({
+      identities: { account3: htmlIdentity },
+      accountIdentities: { account3: [htmlIdentity, aliasPlain] },
+      messages: original,
+    });
+    const { p, logs } = makeProcessor({ messenger });
+    const r = await p.process(replyDraft({ from_address: "alias@family.ORG" }));
+    assert.equal(r.status, "saved");
+    const [reply] = messenger.find("compose.beginReply");
+    assert.equal(reply.args[2].isPlainText, true, "format follows the alias identity (plain text)");
+    const sets = messenger.find("compose.setComposeDetails").map((c) => c.args[1]);
+    assert.deepEqual(sets[0], { identityId: "id3b" });
+    const names = messenger.names();
+    assert.ok(names.indexOf("compose.setComposeDetails") < names.indexOf("compose.saveMessage"), "identity set before save");
+    assert.deepEqual(logs.filter((l) => l.level === "warn"), []);
+  });
+
+  test("new: from_address matching a non-default identity is passed to beginNew", async () => {
+    const messenger = fakeMessenger({ identities: { account3: htmlIdentity }, accountIdentities: { account3: [htmlIdentity, aliasPlain] } });
+    const { p } = makeProcessor({ messenger });
+    await p.process(newDraft({ from_address: "alias@family.org" }));
+    const [n] = messenger.find("compose.beginNew");
+    assert.equal(n.args[0].identityId, "id3b");
+    assert.equal(n.args[0].isPlainText, true);
+    assert.equal(messenger.find("compose.setComposeDetails").length, 0);
+  });
+
+  test("from_address absent or null: account default identity", async () => {
+    const messenger = fakeMessenger({
+      identities: { account3: htmlIdentity },
+      accountIdentities: { account3: [aliasPlain, htmlIdentity] },
+      messages: original,
+    });
+    const { p, logs } = makeProcessor({ messenger });
+    await p.process(newDraft({ draft_id: "n-absent" }));
+    await p.process(newDraft({ draft_id: "n-null", from_address: null }));
+    assert.deepEqual(messenger.find("compose.beginNew").map((c) => c.args[0].identityId), ["id3", "id3"]);
+
+    await p.process(replyDraft());
+    // Thunderbird already chose the default identity: nothing to change.
+    assert.equal(messenger.find("compose.setComposeDetails").filter((c) => "identityId" in c.args[1]).length, 0);
+    assert.deepEqual(logs, []);
+  });
+
+  test("reply: identity Thunderbird picked is corrected to the account default when it differs", async () => {
+    const messenger = fakeMessenger({ identities: { account3: htmlIdentity }, messages: original });
+    const orig = messenger.compose.getComposeDetails;
+    let first = true;
+    messenger.compose.getComposeDetails = async (tabId) => {
+      const d = await orig(tabId);
+      if (first) {
+        first = false;
+        return { ...d, identityId: "id7" };
+      }
+      return d;
+    };
+    const { p } = makeProcessor({ messenger });
+    await p.process(replyDraft());
+    assert.deepEqual(messenger.find("compose.setComposeDetails")[0].args[1], { identityId: "id3" });
+  });
+
+  test("from_address of another account is never used: account default instead, with a warning", async () => {
+    const messenger = fakeMessenger({
+      identities: { account3: htmlIdentity, account7: mom },
+      messages: original,
+    });
+    const { p, logs } = makeProcessor({ messenger });
+    await p.process(newDraft({ from_address: "mom@family.org" }));
+    assert.equal(messenger.find("compose.beginNew")[0].args[0].identityId, "id3");
+
+    await p.process(replyDraft({ from_address: "mom@family.org" }));
+    const identitySets = messenger.find("compose.setComposeDetails").filter((c) => "identityId" in c.args[1]);
+    assert.ok(identitySets.every((c) => c.args[1].identityId === "id3"));
+    assert.ok(!messenger.find("identities.list").some((c) => c.args[0] === "account7"), "other account's identities never listed");
+    const warns = logs.filter((l) => l.level === "warn");
+    assert.equal(warns.length, 2);
+    assert.match(warns[0].msg, /no identity for mom@family\.org/);
+  });
+
+  test("resolveSenderIdentity ignores an identity that reports a different accountId", async () => {
+    const messenger = fakeMessenger({
+      identities: { account3: htmlIdentity },
+      accountIdentities: { account3: [htmlIdentity, { id: "id7", email: "mom@family.org", accountId: "account7" }] },
+    });
+    assert.equal((await resolveSenderIdentity(messenger, "account3", "mom@family.org")).id, "id3");
+    assert.equal((await resolveSenderIdentity(messenger, "account3", "ME@example.com")).id, "id3");
+  });
+
+  test("resolveSenderIdentity falls back to accounts.get().identities when identities.list is unavailable", async () => {
+    const messenger = fakeMessenger({ identities: { account3: htmlIdentity }, accountIdentities: { account3: [htmlIdentity, aliasPlain] } });
+    delete messenger.identities.list;
+    assert.equal((await resolveSenderIdentity(messenger, "account3", "alias@family.org")).id, "id3b");
+  });
+
+  test("failure to set the reply identity fails the draft and closes the window", async () => {
+    const messenger = fakeMessenger({
+      identities: { account3: htmlIdentity },
+      accountIdentities: { account3: [htmlIdentity, aliasPlain] },
+      messages: original,
+    });
+    messenger.compose.setComposeDetails = async () => {
+      throw new Error("boom");
+    };
+    const { p, api } = makeProcessor({ messenger });
+    const r = await p.process(replyDraft({ from_address: "alias@family.org" }));
+    assert.equal(r.status, "failed");
+    assert.match(api.acks[0].body.error, /could not set sender identity/);
+    assert.equal(messenger.find("compose.saveMessage").length, 0);
+    assert.equal(messenger.find("windows.remove").length, 1);
   });
 });
 

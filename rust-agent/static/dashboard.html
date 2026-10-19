@@ -50,6 +50,7 @@
   <div class="tiles" id="tiles"></div>
   <section><h2>Waiting for you</h2><div class="scroll" id="questions"></div></section>
   <section><h2>Applications</h2><div class="scroll" id="apps"></div></section>
+  <section id="unassigned-section" hidden><h2>Mailboxes not in people.json (classified only, no drafts)</h2><div class="scroll" id="unassigned"></div></section>
   <div class="grid2">
     <section><h2>Top jobs</h2><div class="scroll" id="jobs"></div></section>
     <section><h2>Company pipeline</h2><div class="scroll" id="companies"></div></section>
@@ -89,11 +90,33 @@
       tile((d.drafts || {}).review_required, "Drafts needing review") + tile(p.applied, "Applied") +
       tile(p.in_progress, "In progress") + tile(p.blocked, "Blocked") + tile(p.awaiting_approval, "Awaiting approval") +
       tile(p.failed, "Failed") + tile(d.interviews, "Interviews") + tile((d.recruiters || []).length, "Recruiters");
-    document.getElementById("questions").innerHTML = table(["Ref", "Question", "Reason", "Asked"],
-      (d.questions || []).map(function (q) { return [esc(q.ref_code), esc(q.question), esc(q.reason), esc(q.created_at)]; }));
-    document.getElementById("apps").innerHTML = table(["Company", "Role", "Status", "Step / blocker", "Score", "Updated"],
+    // Don't wipe an answer the user is typing during the periodic refresh.
+    var typing = document.activeElement && document.activeElement.classList.contains("ans-input");
+    if (!typing) document.getElementById("questions").innerHTML = table(["Ref", "For", "Question", "Reason", "Your answer"],
+      (d.questions || []).map(function (q) {
+        var attrs = ' data-q="' + esc(q.id) + '"';
+        var control;
+        if (q.field_id === "__approve__") {
+          control = '<button class="ans-btn" data-value="submit"' + attrs + '>Submit application</button> ' +
+                    '<button class="ans-btn" data-value="skip"' + attrs + '>Skip</button>';
+        } else {
+          var list = (q.options || []).length ? ' list="opts-' + esc(q.id) + '"' : "";
+          var dl = (q.options || []).length ? '<datalist id="opts-' + esc(q.id) + '">' +
+            q.options.map(function (o) { return '<option value="' + esc(o) + '">'; }).join("") + '</datalist>' : "";
+          var hint = q.field_id === "__blocker__" ? "done" : "type your answer";
+          control = '<input class="ans-input" id="ans-' + esc(q.id) + '"' + list + ' placeholder="' + hint + '" size="28">' + dl +
+                    ' <button class="ans-btn" data-input="ans-' + esc(q.id) + '"' + attrs + '>Send</button>' +
+                    ' <button class="ans-btn" data-value="skip"' + attrs + '>Skip</button>';
+        }
+        return [esc(q.ref_code), esc(q.person || "-"), esc(q.question), esc(q.reason), control];
+      }));
+    var un = d.unassigned_mailboxes || [];
+    document.getElementById("unassigned-section").hidden = un.length === 0;
+    document.getElementById("unassigned").innerHTML = table(["Mailbox", "Emails", "Last seen"],
+      un.map(function (u) { return [esc(u.mailbox), esc(u.emails), esc(u.last_seen)]; }));
+    document.getElementById("apps").innerHTML = table(["For", "Company", "Role", "Status", "Step / blocker", "Resume", "Score", "Updated"],
       (d.applications || []).map(function (a) {
-        return [esc(a.company), link(a.url, a.role), pill(a.status), esc(a.blocker ? a.blocker + ": " + (a.blocker_detail || "") : (a.step || "")),
+        return [esc(a.person || "-"), esc(a.company), link(a.url, a.role), pill(a.status), esc(a.blocker ? a.blocker + ": " + (a.blocker_detail || "") : (a.step || "")), esc(a.resume || "-"),
           '<span class="num">' + esc(a.score) + '</span>', esc(a.updated_at)];
       }));
     document.getElementById("jobs").innerHTML = table(["Score", "Role", "Company", "Where", "Decision", "Status"],
@@ -106,6 +129,31 @@
     document.getElementById("recruiters").innerHTML = table(["Name", "Title", "Company", "Contact", "Rank", "Source"],
       (d.recruiters || []).map(function (r) { return [esc(r.name), esc(r.title), esc(r.company), r.linkedin_url ? link(r.linkedin_url, "LinkedIn") : esc(r.email), esc(r.rank_score), esc(r.source)]; }));
   }
+  // Answer human-in-the-loop questions (same effect as a Telegram reply).
+  document.getElementById("questions").addEventListener("click", async function (ev) {
+    var b = ev.target.closest ? ev.target.closest(".ans-btn") : null;
+    if (!b) return;
+    var value = b.getAttribute("data-value");
+    if (!value) {
+      var input = document.getElementById(b.getAttribute("data-input"));
+      value = input ? input.value.trim() : "";
+    }
+    if (!value) return;
+    b.disabled = true;
+    var err = document.getElementById("err");
+    try {
+      var res = await fetch("/api/v1/questions/" + encodeURIComponent(b.getAttribute("data-q")) + "/answer", {
+        method: "POST",
+        headers: { "X-EmailHelper-Token": getToken(), "Content-Type": "application/json" },
+        body: JSON.stringify({ answer: value })
+      });
+      var body = await res.json().catch(function () { return {}; });
+      err.textContent = res.ok ? (body.message || "Answer sent.") : ("Error: " + (body.message || res.status));
+    } catch (e) {
+      err.textContent = "Agent unreachable.";
+    }
+    setTimeout(load, 800);
+  });
   document.getElementById("save").addEventListener("click", function () { setToken(document.getElementById("token").value.trim()); load(); });
   document.getElementById("refresh").addEventListener("click", load);
   load();

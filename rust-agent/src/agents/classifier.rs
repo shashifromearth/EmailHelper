@@ -36,6 +36,7 @@ impl Category {
             "partnership" => Self::Partnership,
             "recruiting" | "recruitment" | "job" | "jobs" => Self::Recruiting,
             "invoice" | "billing" => Self::Invoice,
+            "newsletter" | "notification" | "marketing" | "promotion" => Self::Other,
             "follow_up" | "followup" => Self::FollowUp,
             "spam" | "junk" => Self::Spam,
             _ => Self::Other,
@@ -175,10 +176,15 @@ pub fn rule_based(e: &EmailRecord) -> (Category, f32) {
     (Category::Support, 0.3)
 }
 
-pub async fn classify(llm: &LlmRouter, e: &EmailRecord) -> Classification {
+/// Classify an email. Stale mail (older than the configured age limit) and
+/// mail from automated senders is classified by rules only: no LLM call and
+/// no reply draft. Job signals are still detected deterministically.
+pub async fn classify(llm: &LlmRouter, e: &EmailRecord, stale: bool) -> Classification {
     let job_signal = detect::detect_job_email(e);
     let automated = is_automated_sender(&e.from_email);
-    let body = prompts::sanitize_untrusted(&e.body_text, 6000);
+    // The opening of a message is enough to classify it, and a shorter
+    // prompt is much faster on CPU-only machines.
+    let body = prompts::sanitize_untrusted(&e.body_text, 2500);
     let subject = prompts::sanitize_untrusted(&e.subject, 300);
     let from = prompts::sanitize_untrusted(&e.from, 300);
     let mut flags = body.injection_flags.clone();
@@ -193,8 +199,23 @@ pub async fn classify(llm: &LlmRouter, e: &EmailRecord) -> Classification {
     .max_tokens(300);
 
     let (rule_cat, rule_conf) = rule_based(e);
-    let mut c = match llm.complete_json::<LlmClassification>(&req).await {
-        Ok((v, _)) => Classification {
+    let skip_llm = if stale {
+        Some("rules:stale")
+    } else if automated {
+        Some("rules:automated")
+    } else if job_signal.is_some() {
+        // Job mail is recognised reliably by rules; skipping the model here
+        // saves a slow LLM call per recruiter email on CPU-only machines.
+        Some("rules:job")
+    } else {
+        None
+    };
+    let result = match skip_llm {
+        Some(_) => None,
+        None => Some(llm.complete_json::<LlmClassification>(&req).await),
+    };
+    let mut c = match result {
+        Some(Ok((v, _))) => Classification {
             category: Category::parse(&v.category),
             confidence: v.confidence.unwrap_or(0.6).clamp(0.0, 1.0),
             is_job_opportunity: v.is_job_opportunity.unwrap_or(false),
@@ -205,7 +226,7 @@ pub async fn classify(llm: &LlmRouter, e: &EmailRecord) -> Classification {
             job_signal: None,
             injection_flags: vec![],
         },
-        Err(err) => {
+        Some(Err(err)) => {
             tracing::warn!(error = %err, email_id = %e.id, "LLM classification failed; using rules");
             Classification {
                 category: rule_cat,
@@ -219,6 +240,27 @@ pub async fn classify(llm: &LlmRouter, e: &EmailRecord) -> Classification {
                 injection_flags: vec![],
             }
         }
+        None => Classification {
+            category: if skip_llm == Some("rules:job") {
+                Category::Recruiting
+            } else {
+                rule_cat
+            },
+            confidence: if skip_llm == Some("rules:job") {
+                0.85
+            } else {
+                rule_conf
+            },
+            is_job_opportunity: false,
+            // Stale and automated mail never needs a reply; job mail does
+            // unless it's an alert (decided below from the job signal).
+            needs_reply: skip_llm == Some("rules:job"),
+            urgency: "low".into(),
+            summary: String::new(),
+            method: skip_llm.unwrap_or("rules").into(),
+            job_signal: None,
+            injection_flags: vec![],
+        },
     };
 
     // Deterministic signals override the model where they are reliable.

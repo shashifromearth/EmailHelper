@@ -257,14 +257,7 @@ pub fn from_profile(f: &Field, p: &Profile) -> Option<Answer> {
         return choose(f, &p.salary.current_text);
     }
     if label_has(&l, &["sponsorship", "sponsor"]) {
-        return match (
-            ident.requires_sponsorship,
-            p.preferences.visa_sponsorship_required,
-        ) {
-            (Some(b), _) => Some(yes_no(f, b)),
-            (None, true) => Some(yes_no(f, true)),
-            _ => None,
-        };
+        return sponsorship_answer(f, p);
     }
     if label_has(
         &l,
@@ -278,32 +271,7 @@ pub fn from_profile(f: &Field, p: &Profile) -> Option<Answer> {
             "right to work",
         ],
     ) {
-        if ident.work_authorization.is_empty() {
-            return None;
-        }
-        let wa = ident.work_authorization.to_lowercase();
-        // A yes/no question about a specific country: answer yes only if the
-        // stored authorisation mentions that country.
-        if f.options.len() <= 3 && f.options.iter().any(|o| o.eq_ignore_ascii_case("yes")) {
-            let country_ok = p.identity.country.is_empty()
-                || l.contains(&p.identity.country.to_lowercase())
-                || ![
-                    "india",
-                    "united states",
-                    "us ",
-                    "uk",
-                    "canada",
-                    "germany",
-                    "europe",
-                ]
-                .iter()
-                .any(|c| l.contains(c));
-            if wa.starts_with("yes") || (country_ok && !wa.starts_with("no")) {
-                return Some(yes_no(f, true));
-            }
-            return None;
-        }
-        return choose(f, &ident.work_authorization);
+        return work_authorization_answer(f, p);
     }
     if label_has(&l, &["relocate", "relocation"]) {
         return ident.willing_to_relocate.map(|b| yes_no(f, b));
@@ -373,6 +341,68 @@ pub fn from_profile(f: &Field, p: &Profile) -> Option<Answer> {
     None
 }
 
+/// Countries a question asks about. "us" is only trusted next to "work in"
+/// style phrasing, because as a pronoun it is far more common.
+fn countries_asked(label: &str) -> Vec<&'static str> {
+    let mut c = crate::knowledge::profile::countries_in(label);
+    let l = label.to_lowercase();
+    let us_phrase = [
+        "in the us",
+        "in us",
+        "the us?",
+        "the us ",
+        "(us)",
+        "us-based",
+        "us based",
+    ]
+    .iter()
+    .any(|p| l.contains(p));
+    if us_phrase && !c.contains(&"United States") {
+        c.push("United States");
+    }
+    c
+}
+
+/// "Are you authorized to work in X?" Yes only for countries the user is
+/// authorized in, No for others, and a human decides when no country is named.
+fn work_authorization_answer(f: &Field, p: &Profile) -> Option<Answer> {
+    let authorized = p.authorized_countries();
+    if authorized.is_empty() {
+        return None;
+    }
+    let is_yes_no = f.options.is_empty()
+        || (f.options.len() <= 3 && f.options.iter().any(|o| o.eq_ignore_ascii_case("yes")));
+    if !is_yes_no {
+        return choose(f, &p.identity.work_authorization);
+    }
+    let asked = countries_asked(&f.label);
+    if asked.is_empty() {
+        // Depends on where the job is; ask rather than guess.
+        return None;
+    }
+    Some(yes_no(f, asked.iter().all(|c| authorized.contains(c))))
+}
+
+/// "Will you require sponsorship (in X)?" No inside authorized countries;
+/// for other countries it follows `requires_sponsorship`.
+fn sponsorship_answer(f: &Field, p: &Profile) -> Option<Answer> {
+    let authorized = p.authorized_countries();
+    let asked = countries_asked(&f.label);
+    if !asked.is_empty() && !authorized.is_empty() && asked.iter().all(|c| authorized.contains(c)) {
+        return Some(yes_no(f, false));
+    }
+    let needs = p
+        .identity
+        .requires_sponsorship
+        .or(p.preferences.visa_sponsorship_required.then_some(true));
+    match needs {
+        Some(false) => Some(yes_no(f, false)),
+        Some(true) if !asked.is_empty() => Some(yes_no(f, true)),
+        // Needs sponsorship somewhere, but the question doesn't say where.
+        _ => None,
+    }
+}
+
 fn option_contains_years(opt: &str, years: f64) -> bool {
     let nums: Vec<f64> = opt
         .split(|c: char| !c.is_ascii_digit() && c != '.')
@@ -426,6 +456,7 @@ struct LlmAnswer {
 }
 
 /// Answer one field. `memory` lookups use exact normalised question text.
+#[allow(clippy::too_many_arguments)] // explicit dependencies read better than a context bag here
 pub async fn answer_field(
     f: &Field,
     profile: &Profile,
@@ -433,11 +464,14 @@ pub async fn answer_field(
     kb: &KnowledgeBase,
     llm: &LlmRouter,
     job_context: &str,
+    scope: &crate::knowledge::Scope,
+    memory_ns: &str,
 ) -> AppResult<Answer> {
     if let Some(a) = from_profile(f, profile) {
         return Ok(a);
     }
-    let label = f.label.clone();
+    // Remembered answers are per person (`memory_ns` = "<person>:").
+    let label = format!("{memory_ns}{}", f.label);
     if let Some(prev) = db.call(move |c| jdb::recall_answer(c, &label)).await? {
         if let Some(a) = choose(f, &prev) {
             return Ok(a);
@@ -461,7 +495,10 @@ pub async fn answer_field(
             Answer::Skip
         });
     }
-    let snippets = kb.search(&f.label, 5).await.unwrap_or_default();
+    let snippets = kb
+        .search_scoped(&f.label, 5, scope)
+        .await
+        .unwrap_or_default();
     let mut kb_text = profile.summary_text();
     for sn in snippets {
         kb_text.push_str(&format!(
@@ -679,6 +716,43 @@ mod tests {
                 &p
             ),
             Some(Answer::Value("60 LPA".into()))
+        );
+    }
+
+    #[test]
+    fn work_authorization_is_country_aware() {
+        let mut p = profile();
+        p.identity.work_authorization = "India".into();
+        p.identity.requires_sponsorship = Some(true);
+        let yn = ["Yes", "No"];
+        let ask = |label: &str| from_profile(&field("q", label, "select", true, &yn), &p);
+        assert_eq!(
+            ask("Are you legally authorized to work in India?"),
+            Some(Answer::Value("Yes".into()))
+        );
+        assert_eq!(
+            ask("Are you legally authorized to work in the United States?"),
+            Some(Answer::Value("No".into()))
+        );
+        assert_eq!(
+            ask("Are you authorized to work in the US?"),
+            Some(Answer::Value("No".into()))
+        );
+        assert_eq!(
+            ask("Are you legally authorized to work in the country where this job is located?"),
+            None
+        );
+        assert_eq!(
+            ask("Will you require visa sponsorship to work in India?"),
+            Some(Answer::Value("No".into()))
+        );
+        assert_eq!(
+            ask("Will you require visa sponsorship to work in the UK?"),
+            Some(Answer::Value("Yes".into()))
+        );
+        assert_eq!(
+            ask("Will you now or in the future require sponsorship?"),
+            None
         );
     }
 

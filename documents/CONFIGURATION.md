@@ -27,19 +27,30 @@ cloud API keys never cause a failure: the agent falls back to local Ollama.
 | `EH_MAX_ATTACHMENT_BYTES` | `26214400` | Attachments above this size are flagged in the audit log. Attachment content is never ingested. |
 | `EH_WORKFLOW_VERSION` | `1` | Part of the idempotency key; bump it to re-process mail. |
 | `EH_MAX_RETRIES` | `3` | Attempts per email job before it is marked dead. |
+| `EH_MAX_EMAIL_AGE_HOURS` | `72` | Mail older than this (for example a bulk pass over old unread messages) is recorded and checked for job signals by rules, but gets no LLM call and no draft. `0` turns the limit off. |
 
 ## LLM
 
 | Variable | Default | Description |
 |---|---|---|
-| `MODEL_MODE` | `LOCAL` | `LOCAL`, `REMOTE_OPENAI`, `REMOTE_GEMINI`, `REMOTE_ANTHROPIC` or `MOCK` (deterministic, offline). |
+| `MODEL_MODE` | `LOCAL` | `LOCAL`, `REMOTE_GROQ`, `REMOTE_GEMINI`, `REMOTE_OPENAI`, `REMOTE_ANTHROPIC` or `MOCK` (deterministic, offline). Cloud modes send email text to that provider. Values from `private.json` never leave the machine: they are inserted after the draft is generated. |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama server address. |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Also `qwen2.5:3b` (low RAM), `llama3` or `mistral`. |
+| `OLLAMA_NUM_CTX` | `8192` | Context window requested from Ollama. Ollama's own default of 4096 tokens can silently cut off long draft prompts. |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` | — / `gpt-4o-mini` / `https://api.openai.com/v1` | Works with any OpenAI-compatible endpoint. |
-| `GEMINI_API_KEY` / `GEMINI_MODEL` | — / `gemini-2.0-flash` | The key is sent in a header, never in the URL. |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | — / `gemini-flash-latest` | The key is sent in a header, never in the URL. |
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | — / `claude-haiku-5-5` | Messages API. |
+| `GROQ_API_KEY` / `GROQ_MODEL` / `GROQ_BASE_URL` | — / `openai/gpt-oss-20b` / `https://api.groq.com/openai/v1` | Groq's OpenAI-compatible API. Reasoning models (gpt-oss, o-series, qwen3) are asked for low reasoning effort and given extra token headroom. |
 | `LLM_TIMEOUT_SECS` | `90` | Timeout per request. |
 | `LLM_FALLBACK_TO_LOCAL` | `true` | Retries a failed remote request on Ollama. |
+| `LLM_FALLBACK_CLOUD` | `true` | In a cloud mode, tries the other cloud providers that have a key first. The order is Groq, Gemini, OpenAI, Anthropic, then Ollama. `LOCAL` mode never uses the cloud. |
+
+Run `emailhelper llm-test` to send a one-line test prompt to every provider
+that has a key (and to Ollama), and see which ones work and how fast they
+answer.
+| `LLM_REVIEW` | `auto` | Adds an LLM second-opinion review of each draft. `auto` turns it on for cloud models and off for local Ollama, where it costs a whole extra call. Rule-based validation always runs. |
+| `LLM_MAX_PARALLEL` | `0` (auto) | Maximum concurrent model calls. Auto is 1 for local Ollama, since a CPU model only gets slower with parallel requests, and 4 for cloud models. |
+| `OLLAMA_KEEP_ALIVE` | `24h` | How long Ollama keeps the model loaded, which avoids a reload of about 12 s. |
 
 ## Telegram
 
@@ -47,7 +58,7 @@ cloud API keys never cause a failure: the agent falls back to local Ollama.
 |---|---|---|
 | `TELEGRAM_ENABLED` | `false` | Turns on notifications and the interactive bot. |
 | `TELEGRAM_BOT_TOKEN` | — | From @BotFather. |
-| `TELEGRAM_CHAT_ID` | — | Your chat id. Messages from any other chat are ignored. |
+| `TELEGRAM_CHAT_ID` | — | Default chat for all people. Person-specific chats can be added in `knowledge/people.json`. Messages from any other chat are ignored. Run `emailhelper telegram-chats` to list chat IDs. |
 | `TELEGRAM_API_BASE` | `https://api.telegram.org` | Override for testing. |
 | `TELEGRAM_POLL_TIMEOUT_SECS` | `50` | `getUpdates` long-poll timeout. |
 
@@ -86,11 +97,16 @@ Browser worker settings (read by `browser-worker/`): `BROWSER_WORKER_HOST`,
 | `RESEARCH_CAREER_PAGES` | — | Career page URLs, opened through the browser worker. |
 | `RESEARCH_MAX_RESULTS_PER_QUERY` | `20` | Maximum SearXNG results per query. |
 | `RESEARCH_SUMMARY_TOP_N` | `10` | Number of jobs in the Telegram summary. |
+| `RESEARCH_AUTO_APPLY` | `false` | Start applications for discovered jobs that aren't skipped (needs `JOB_AGENT_ENABLED`). Jobs from your own mail are handled by the job agent regardless. |
 | `RECRUITER_DISCOVERY_ENABLED` | `false` | Finds recruiters for recruiting or job emails. |
 | `RECRUITER_LINKEDIN_ENABLED` | `false` | LinkedIn people search through your logged-in worker profile. |
 | `RECRUITER_DAILY_LIMIT` | `20` | Maximum LinkedIn searches per day. |
 
 ## Knowledge files
+
+People, mailboxes, purposes, private facts and resumes are described in
+[KNOWLEDGE.md](KNOWLEDGE.md).
+
 
 See [API.md §4](API.md#4-knowledge-directory-eh_knowledge_dir-default-knowledge).
 Notable switches in `preferences.json`:

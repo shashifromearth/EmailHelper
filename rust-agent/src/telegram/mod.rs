@@ -78,13 +78,31 @@ impl Notifier {
         self.send(event, text, None).await
     }
 
+    /// Notify about a specific person's mailbox: their own chat if configured,
+    /// otherwise the default chat. One bot serves everyone.
+    pub async fn notify_person(&self, chat: Option<i64>, event: Event, text: &str) -> Option<i64> {
+        self.send_in(chat, event, text, None).await
+    }
+
     pub async fn send(&self, event: Event, text: &str, reply_to: Option<i64>) -> Option<i64> {
+        self.send_in(None, event, text, reply_to).await
+    }
+
+    /// Send to `chat` (or the default chat when None).
+    pub async fn send_in(
+        &self,
+        chat: Option<i64>,
+        event: Event,
+        text: &str,
+        reply_to: Option<i64>,
+    ) -> Option<i64> {
         let client = self.client.as_ref()?;
+        let chat = chat.unwrap_or(client.chat_id);
         self.metrics
             .telegram_requests_total
             .with_label_values(&["out"])
             .inc();
-        match client.send(text, reply_to).await {
+        match client.send_to(chat, text, reply_to).await {
             Ok(id) => {
                 self.metrics
                     .telegram_notifications_total
@@ -103,6 +121,14 @@ impl Notifier {
 
 /// Format helpers keep message layouts consistent with documents/API.md.
 pub mod format {
+    /// Prefix for messages about a person's mailbox: `[Name · mailbox]`.
+    pub fn person_tag(name: &str, mailbox: Option<&str>) -> String {
+        match mailbox {
+            Some(m) => format!("[{name} · {m}]"),
+            None => format!("[{name}]"),
+        }
+    }
+
     pub fn draft_created(
         sender: &str,
         subject: &str,

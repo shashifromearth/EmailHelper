@@ -1,0 +1,19 @@
+{
+  "core": [
+    "Rust",
+    "Python",
+    "LLMs",
+    "RAG",
+    "PyTorch",
+    "Kubernetes",
+    "Distributed Systems"
+  ],
+  "secondary": [
+    "Go",
+    "TypeScript",
+    "AWS",
+    "Kafka",
+    "PostgreSQL",
+    "Terraform"
+  ]
+}

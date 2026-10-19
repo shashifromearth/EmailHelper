@@ -119,9 +119,13 @@ pub trait LlmProvider: Send + Sync {
 
 pub struct LlmRouter {
     primary: Arc<dyn LlmProvider>,
-    fallback: Option<Arc<dyn LlmProvider>>,
+    /// Tried in order when the primary fails.
+    fallbacks: Vec<Arc<dyn LlmProvider>>,
     timeout: std::time::Duration,
     metrics: Arc<Metrics>,
+    /// Limits concurrent model calls (a CPU-bound local model gets slower,
+    /// not faster, with parallel requests).
+    gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl LlmRouter {
@@ -133,10 +137,27 @@ impl LlmRouter {
     ) -> Self {
         Self {
             primary,
-            fallback,
+            fallbacks: fallback.into_iter().collect(),
             timeout,
             metrics,
+            gate: None,
         }
+    }
+
+    /// Replace the fallback chain.
+    pub fn with_fallbacks(mut self, chain: Vec<Arc<dyn LlmProvider>>) -> Self {
+        self.fallbacks = chain;
+        self
+    }
+
+    pub fn fallback_names(&self) -> Vec<String> {
+        self.fallbacks.iter().map(|p| format!("{}:{}", p.name(), p.model())).collect()
+    }
+
+    /// Allow at most `n` concurrent model calls (0 = unlimited).
+    pub fn with_max_parallel(mut self, n: usize) -> Self {
+        self.gate = (n > 0).then(|| Arc::new(tokio::sync::Semaphore::new(n)));
+        self
     }
 
     /// Build the router from configuration. Never fails: a remote mode without
@@ -146,32 +167,45 @@ impl LlmRouter {
             http.clone(),
             &cfg.ollama_base_url,
             &cfg.ollama_model,
+            cfg.ollama_num_ctx,
+            &cfg.ollama_keep_alive,
         ));
+        let cloud = |mode: ModelMode| -> Option<Arc<dyn LlmProvider>> {
+            match mode {
+                ModelMode::RemoteOpenAi => cfg.openai_api_key.as_ref().map(|k| {
+                    Arc::new(OpenAiProvider::new(
+                        http.clone(),
+                        &cfg.openai_base_url,
+                        k,
+                        &cfg.openai_model,
+                    )) as Arc<dyn LlmProvider>
+                }),
+                ModelMode::RemoteGroq => cfg.groq_api_key.as_ref().map(|k| {
+                    Arc::new(
+                        OpenAiProvider::new(http.clone(), &cfg.groq_base_url, k, &cfg.groq_model)
+                            .named("groq"),
+                    ) as Arc<dyn LlmProvider>
+                }),
+                ModelMode::RemoteGemini => cfg.gemini_api_key.as_ref().map(|k| {
+                    Arc::new(GeminiProvider::new(
+                        http.clone(),
+                        &cfg.gemini_base_url,
+                        k,
+                        &cfg.gemini_model,
+                    )) as Arc<dyn LlmProvider>
+                }),
+                ModelMode::RemoteAnthropic => cfg.anthropic_api_key.as_ref().map(|k| {
+                    Arc::new(AnthropicProvider::new(
+                        http.clone(),
+                        &cfg.anthropic_base_url,
+                        k,
+                        &cfg.anthropic_model,
+                    )) as Arc<dyn LlmProvider>
+                }),
+                ModelMode::Local | ModelMode::Mock => None,
+            }
+        };
         let remote: Option<Arc<dyn LlmProvider>> = match cfg.mode {
-            ModelMode::RemoteOpenAi => cfg.openai_api_key.as_ref().map(|k| {
-                Arc::new(OpenAiProvider::new(
-                    http.clone(),
-                    &cfg.openai_base_url,
-                    k,
-                    &cfg.openai_model,
-                )) as Arc<dyn LlmProvider>
-            }),
-            ModelMode::RemoteGemini => cfg.gemini_api_key.as_ref().map(|k| {
-                Arc::new(GeminiProvider::new(
-                    http.clone(),
-                    &cfg.gemini_base_url,
-                    k,
-                    &cfg.gemini_model,
-                )) as Arc<dyn LlmProvider>
-            }),
-            ModelMode::RemoteAnthropic => cfg.anthropic_api_key.as_ref().map(|k| {
-                Arc::new(AnthropicProvider::new(
-                    http.clone(),
-                    &cfg.anthropic_base_url,
-                    k,
-                    &cfg.anthropic_model,
-                )) as Arc<dyn LlmProvider>
-            }),
             ModelMode::Mock => {
                 return Self::new(
                     Arc::new(MockProvider::default()),
@@ -180,12 +214,35 @@ impl LlmRouter {
                     metrics,
                 )
             }
-            ModelMode::Local => None,
+            mode => cloud(mode),
         };
         match remote {
             Some(r) => {
-                let fb = cfg.fallback_to_local.then_some(ollama);
-                Self::new(r, fb, cfg.timeout, metrics)
+                // Primary cloud → other clouds with a key → local Ollama.
+                let mut chain: Vec<Arc<dyn LlmProvider>> = Vec::new();
+                if cfg.fallback_cloud {
+                    for m in [
+                        ModelMode::RemoteGroq,
+                        ModelMode::RemoteGemini,
+                        ModelMode::RemoteOpenAi,
+                        ModelMode::RemoteAnthropic,
+                    ] {
+                        if m != cfg.mode {
+                            chain.extend(cloud(m));
+                        }
+                    }
+                }
+                if cfg.fallback_to_local {
+                    chain.push(ollama);
+                }
+                let n = if cfg.max_parallel > 0 {
+                    cfg.max_parallel
+                } else {
+                    4
+                };
+                Self::new(r, None, cfg.timeout, metrics)
+                    .with_fallbacks(chain)
+                    .with_max_parallel(n)
             }
             None => {
                 if cfg.mode != ModelMode::Local {
@@ -194,7 +251,13 @@ impl LlmRouter {
                         "API key for remote model mode is missing; using local Ollama"
                     );
                 }
-                Self::new(ollama, None, cfg.timeout, metrics)
+                // One call at a time to a local CPU model.
+                let n = if cfg.max_parallel > 0 {
+                    cfg.max_parallel
+                } else {
+                    1
+                };
+                Self::new(ollama, None, cfg.timeout, metrics).with_max_parallel(n)
             }
         }
     }
@@ -211,6 +274,11 @@ impl LlmRouter {
     }
 
     async fn call(&self, p: &Arc<dyn LlmProvider>, req: &LlmRequest) -> Result<String, LlmError> {
+        // Wait for a slot first; queueing time doesn't count towards the timeout.
+        let _permit = match &self.gate {
+            Some(g) => g.clone().acquire_owned().await.ok(),
+            None => None,
+        };
         let started = Instant::now();
         let res = match tokio::time::timeout(self.timeout, p.complete(req)).await {
             Ok(r) => r,
@@ -237,21 +305,25 @@ impl LlmRouter {
                 provider: self.primary.name().to_string(),
                 model: self.primary.model().to_string(),
             }),
-            Err(e) => {
-                let Some(fb) = &self.fallback else {
-                    return Err(e);
-                };
-                tracing::warn!(error = %e, task = req.task.as_str(), "primary LLM failed; falling back");
-                self.metrics
-                    .llm_requests_total
-                    .with_label_values(&[fb.name(), "fallback"])
-                    .inc();
-                let text = self.call(fb, req).await?;
-                Ok(LlmResponse {
-                    text,
-                    provider: fb.name().to_string(),
-                    model: fb.model().to_string(),
-                })
+            Err(mut err) => {
+                for fb in &self.fallbacks {
+                    tracing::warn!(error = %err, task = req.task.as_str(), next = fb.name(), "LLM call failed; falling back");
+                    self.metrics
+                        .llm_requests_total
+                        .with_label_values(&[fb.name(), "fallback"])
+                        .inc();
+                    match self.call(fb, req).await {
+                        Ok(text) => {
+                            return Ok(LlmResponse {
+                                text,
+                                provider: fb.name().to_string(),
+                                model: fb.model().to_string(),
+                            })
+                        }
+                        Err(e) => err = e,
+                    }
+                }
+                Err(err)
             }
         }
     }
@@ -374,6 +446,48 @@ mod tests {
                 .get(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn fallback_chain_is_tried_in_order() {
+        let m = Arc::new(Metrics::new());
+        let r = LlmRouter::new(Arc::new(Failing), None, std::time::Duration::from_secs(5), m.clone())
+            .with_fallbacks(vec![Arc::new(Failing), Arc::new(MockProvider::default())]);
+        let resp = r
+            .complete(&LlmRequest::new(LlmTask::Summarize, "s", "hello world"))
+            .await
+            .unwrap();
+        assert_eq!(resp.provider, "mock");
+        assert_eq!(m.llm_requests_total.with_label_values(&["failing", "fallback"]).get(), 1);
+    }
+
+    #[test]
+    fn groq_primary_falls_back_to_gemini_then_ollama() {
+        let cfg = crate::config::Config::from_lookup(|k| match k {
+            "MODEL_MODE" => Some("GROQ".into()),
+            "GROQ_API_KEY" => Some("g".into()),
+            "GEMINI_API_KEY" => Some("x".into()),
+            _ => None,
+        })
+        .unwrap();
+        let r = LlmRouter::from_config(&cfg.llm, reqwest::Client::new(), Arc::new(Metrics::new()));
+        assert_eq!(r.provider_name(), "groq");
+        assert_eq!(r.model_name(), "openai/gpt-oss-20b");
+        let names: Vec<String> = r.fallback_names().iter().map(|n| n.split(':').next().unwrap().to_string()).collect();
+        assert_eq!(names, vec!["gemini", "ollama"]);
+    }
+
+    #[test]
+    fn local_mode_never_uses_cloud() {
+        let cfg = crate::config::Config::from_lookup(|k| match k {
+            "GROQ_API_KEY" => Some("g".into()),
+            "GEMINI_API_KEY" => Some("x".into()),
+            _ => None,
+        })
+        .unwrap();
+        let r = LlmRouter::from_config(&cfg.llm, reqwest::Client::new(), Arc::new(Metrics::new()));
+        assert_eq!(r.provider_name(), "ollama");
+        assert!(r.fallback_names().is_empty());
     }
 
     #[test]

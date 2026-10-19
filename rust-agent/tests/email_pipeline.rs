@@ -487,3 +487,46 @@ async fn long_poll_wakes_immediately_when_draft_arrives() {
         "long poll returned in {elapsed:?}"
     );
 }
+
+#[tokio::test]
+async fn stale_mail_and_automated_senders_skip_the_llm() {
+    let llm = MockProvider::default();
+    let probe = llm.clone();
+    let a = builder().llm(llm).start().await;
+    let mut old = email(
+        "acct1",
+        "<old@x>",
+        "jane@acme.com",
+        "Question from 2021",
+        "Could you send me your rates?",
+    );
+    old["date"] = json!("2021-03-01T10:00:00Z");
+    let r1: serde_json::Value = a.post("/api/v1/emails", &old).await.json().await.unwrap();
+    let news = email(
+        "acct1",
+        "<news@x>",
+        "Weekly <newsletter@digest.example>",
+        "This week",
+        "Top stories this week...",
+    );
+    let r2: serde_json::Value = a.post("/api/v1/emails", &news).await.json().await.unwrap();
+    for id in [
+        r1["email_id"].as_str().unwrap(),
+        r2["email_id"].as_str().unwrap(),
+    ] {
+        wait_for("processed", T, || async {
+            (email_status(&a.app, id).await == "done").then_some(())
+        })
+        .await;
+    }
+    assert_eq!(probe.calls(), 0, "no LLM calls for stale or automated mail");
+    let d = a.get_json("/api/v1/drafts/pending?wait=0").await;
+    assert!(d["drafts"].as_array().unwrap().is_empty());
+    let audit = a
+        .get_json(&format!(
+            "/api/v1/audit?entity_id={}",
+            r1["email_id"].as_str().unwrap()
+        ))
+        .await;
+    assert!(audit.to_string().contains("skipped_old"), "{audit}");
+}

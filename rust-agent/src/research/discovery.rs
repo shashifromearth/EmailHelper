@@ -48,7 +48,7 @@ async fn collect(app: &App, report: &mut DiscoveryReport) -> Vec<RawJob> {
     let mut out: Vec<RawJob> = Vec::new();
 
     if let Some(base) = &r.searxng_url {
-        for term in &r.search_terms {
+        'searx: for term in &r.search_terms {
             for q in [
                 format!("{term} site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com"),
                 format!("{term} job opening apply"),
@@ -67,7 +67,14 @@ async fn collect(app: &App, report: &mut DiscoveryReport) -> Vec<RawJob> {
                             }
                         }
                     }
-                    Err(e) => report.errors.push(format!("searxng: {e}")),
+                    Err(e) => {
+                        let unreachable = matches!(&e, crate::error::AppError::Http(re) if re.is_connect() || re.is_timeout());
+                        report.errors.push(format!("searxng: {e}"));
+                        if unreachable {
+                            // One error is enough; don't hammer a server that isn't there.
+                            break 'searx;
+                        }
+                    }
                 }
             }
         }
@@ -151,6 +158,8 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
     let started = Instant::now();
     let mut report = DiscoveryReport::default();
     let raw = collect(app, &mut report).await;
+    // Discovery scores jobs for one person (people.json `research_person`).
+    let research_person = app.knowledge.people().research_person();
     let terms = &app.cfg.research.search_terms;
     let mut scored: Vec<(jdb::JobRecord, Decision)> = Vec::new();
     for j in raw
@@ -159,7 +168,15 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
     {
         report.relevant += 1;
         let src = j.source.split(':').next().unwrap_or("research").to_string();
-        match crate::jobs::score_and_store(app, &j.source, j.source_ref, j.details).await {
+        match crate::jobs::score_and_store(
+            app,
+            &research_person,
+            &j.source,
+            j.source_ref,
+            j.details,
+        )
+        .await
+        {
             Ok((rec, decision, is_new)) => {
                 if is_new {
                     report.new_jobs += 1;
@@ -189,8 +206,9 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
         })
         .collect();
 
-    // Auto-start applications for strong matches when the job agent is on.
-    if app.cfg.jobs.enabled {
+    // Discovered jobs are only applied to when explicitly enabled: they come
+    // from the open web rather than from mail addressed to the user.
+    if app.cfg.jobs.enabled && app.cfg.research.auto_apply {
         for (rec, _) in scored.iter().filter(|(_, d)| *d != Decision::Skip) {
             if let Some(u) = rec.details.url.clone() {
                 if let Err(e) = crate::jobs::application::start(app, rec, &u).await {

@@ -71,7 +71,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/drafts/{id}/ack", post(handlers::ack_draft))
         .route("/status", get(handlers::status))
         .route("/dashboard", get(handlers::dashboard_data))
-        .route("/jobs", get(handlers::list_jobs))
+        .route("/jobs", get(handlers::list_jobs).post(handlers::submit_job))
         .route("/applications", get(handlers::list_applications))
         .route(
             "/applications/{id}/answer",
@@ -81,6 +81,7 @@ pub fn router(app: Arc<App>) -> Router {
             "/applications/{id}/resume",
             post(handlers::resume_application),
         )
+        .route("/questions/{id}/answer", post(handlers::answer_question))
         .route("/recruiters", get(handlers::list_recruiters))
         .route("/research/run", post(handlers::run_research))
         .route("/audit", get(handlers::audit_log))

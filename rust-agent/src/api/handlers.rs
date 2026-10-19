@@ -18,8 +18,17 @@ use crate::queue;
 
 pub async fn submit_email(
     State(app): State<Arc<App>>,
-    Json(mut e): Json<EmailIn>,
+    body: Result<Json<EmailIn>, axum::extract::rejection::JsonRejection>,
 ) -> AppResult<Response> {
+    let mut e = match body {
+        Ok(Json(e)) => e,
+        Err(r) => {
+            // Malformed or oversized payloads are otherwise rejected without a trace.
+            tracing::warn!(status = r.status().as_u16(), reason = %r.body_text(), "email payload rejected");
+            app.metrics.failure("api_payload");
+            return Ok(r.into_response());
+        }
+    };
     e.validate(app.cfg.max_email_text_bytes)?;
     let oversized: Vec<String> = e
         .attachments
@@ -211,9 +220,16 @@ pub async fn status(State(app): State<Arc<App>>) -> AppResult<Json<Value>> {
 }
 
 pub async fn dashboard_data(State(app): State<Arc<App>>) -> AppResult<Json<Value>> {
+    let people = app.knowledge.people();
+    let names: std::collections::BTreeMap<String, String> = people
+        .persons
+        .iter()
+        .map(|p| (p.id.clone(), p.name.clone()))
+        .collect();
+    let multi = !people.legacy;
     let data = app
         .db
-        .call(|c| {
+        .call(move |c| {
             let pipeline = jdb::pipeline_counts(c)?;
             let apps = jdb::list_applications(c, None, 100)?;
             let jobs = jdb::list_jobs(c, 50, None)?;
@@ -222,6 +238,27 @@ pub async fn dashboard_data(State(app): State<Arc<App>>) -> AppResult<Json<Value
             let interviews = jdb::interview_count(c)?;
             let drafts = drafts::counts(c)?;
             let emails = emails::count(c)?;
+            let unassigned = if multi { emails::unassigned_mailboxes(c)? } else { Vec::new() };
+            let app_person: std::collections::BTreeMap<String, Option<String>> =
+                apps.iter().map(|a| (a.id.clone(), a.person_id.clone())).collect();
+            let person_name = |id: Option<&str>| -> String {
+                id.map(|i| names.get(i).cloned().unwrap_or_else(|| i.to_string())).unwrap_or_default()
+            };
+            let questions: Vec<Value> = questions
+                .iter()
+                .map(|q| {
+                    let pid = match q.field_id.as_deref().and_then(|f| f.strip_prefix("fact:")) {
+                        Some(rest) => rest.split(':').next().map(str::to_string),
+                        None => q
+                            .application_id
+                            .as_ref()
+                            .and_then(|a| app_person.get(a).cloned().flatten()),
+                    };
+                    let mut v = serde_json::to_value(q).unwrap_or(Value::Null);
+                    v["person"] = Value::String(person_name(pid.as_deref()));
+                    v
+                })
+                .collect();
             let mut companies: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>> = Default::default();
             for a in &apps {
                 *companies
@@ -239,7 +276,9 @@ pub async fn dashboard_data(State(app): State<Arc<App>>) -> AppResult<Json<Value
                     "id": a.id, "company": a.company, "role": a.role, "url": a.url, "status": a.status,
                     "step": a.current_step, "blocker": a.blocker_kind, "blocker_detail": a.blocker_detail,
                     "score": a.score, "applied_at": a.applied_at, "updated_at": a.updated_at,
+                    "person": person_name(a.person_id.as_deref()), "resume": a.resume_file,
                 })).collect::<Vec<_>>(),
+                "unassigned_mailboxes": unassigned,
                 "jobs": jobs.iter().map(|j| json!({
                     "id": j.id, "title": j.details.title, "company": j.details.company, "url": j.details.url,
                     "location": j.details.location, "remote": j.details.remote, "salary": j.details.salary,
@@ -276,6 +315,78 @@ pub async fn list_jobs(
     Ok(Json(json!({ "jobs": jobs })))
 }
 
+#[derive(Deserialize)]
+pub struct SubmitJobBody {
+    url: String,
+    /// Start an application right away (still subject to submit mode, the
+    /// approval gate and blockers). Requires `JOB_AGENT_ENABLED`.
+    #[serde(default)]
+    apply: bool,
+    /// Person id from people.json (the default person when omitted).
+    #[serde(default)]
+    person: Option<String>,
+}
+
+/// Add a job by URL (e.g. one you found yourself): open it, extract details,
+/// score it against the profile, store it, and optionally start applying.
+pub async fn submit_job(
+    State(app): State<Arc<App>>,
+    Json(b): Json<SubmitJobBody>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let url = url::Url::parse(b.url.trim())
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https"))
+        .ok_or_else(|| AppError::Validation("url must be an absolute http(s) URL".into()))?
+        .to_string();
+    if b.apply && !app.cfg.jobs.enabled {
+        return Err(AppError::Validation(
+            "apply=true requires JOB_AGENT_ENABLED=true".into(),
+        ));
+    }
+    let people = app.knowledge.people();
+    let person = match b.person.as_deref() {
+        Some(id) => people
+            .person(id)
+            .ok_or_else(|| AppError::Validation(format!("unknown person {id}")))?,
+        None => people.default_person(),
+    };
+    let page = crate::jobs::fetch_page(&app, &url).await?;
+    let mut details = crate::jobs::extract::parse_job(&page, &person.profile.all_skills());
+    details.url = Some(url.clone());
+    if details.title.trim().is_empty() {
+        return Err(AppError::Validation(
+            "could not find a job title on that page".into(),
+        ));
+    }
+    let (job, decision, is_new) =
+        crate::jobs::score_and_store(&app, &person, "manual", None, details).await?;
+    app.audit(
+        "api",
+        "job_submitted",
+        "job",
+        &job.id,
+        json!({ "url": url, "score": job.score, "decision": decision.as_str() }),
+    )
+    .await;
+    let application_id = if b.apply {
+        Some(crate::jobs::application::start(&app, &job, &url).await?)
+    } else {
+        None
+    };
+    Ok((
+        if is_new {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        Json(json!({
+            "job": job,
+            "decision": decision.as_str(),
+            "application_id": application_id,
+        })),
+    ))
+}
+
 pub async fn list_applications(
     State(app): State<Arc<App>>,
     Query(q): Query<ListQuery>,
@@ -309,6 +420,26 @@ pub async fn answer_application(
             "question does not belong to this application".into(),
         ));
     }
+    let reply = crate::jobs::application::handle_human_answer(&app, &q, &b.answer).await?;
+    Ok(Json(json!({ "message": reply })))
+}
+
+#[derive(Deserialize)]
+pub struct QuestionAnswerBody {
+    answer: String,
+}
+
+/// Answer any open question (application or person fact) - same effect as a
+/// Telegram reply.
+pub async fn answer_question(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<QuestionAnswerBody>,
+) -> AppResult<Json<Value>> {
+    if b.answer.len() > 4000 {
+        return Err(AppError::Validation("answer too long".into()));
+    }
+    let q = app.db.call(move |c| jdb::get_question(c, &id)).await?;
     let reply = crate::jobs::application::handle_human_answer(&app, &q, &b.answer).await?;
     Ok(Json(json!({ "message": reply })))
 }

@@ -1,0 +1,25 @@
+[
+  {
+    "company": "Example Analytics",
+    "title": "Principal AI Engineer",
+    "start": "2021-04",
+    "end": "",
+    "location": "Bengaluru",
+    "highlights": [
+      "Led the LLM platform team (9 engineers)",
+      "Built RAG and evaluation pipelines used by 4 product lines",
+      "Reduced inference cost 45%"
+    ]
+  },
+  {
+    "company": "Sample Systems",
+    "title": "Senior Software Engineer",
+    "start": "2016-07",
+    "end": "2021-03",
+    "location": "Pune",
+    "highlights": [
+      "Rewrote the search ranking service in Rust",
+      "Owned Kubernetes-based ML serving"
+    ]
+  }
+]

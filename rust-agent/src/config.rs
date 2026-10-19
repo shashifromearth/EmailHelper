@@ -15,6 +15,8 @@ pub enum ModelMode {
     RemoteOpenAi,
     RemoteGemini,
     RemoteAnthropic,
+    /// Groq's OpenAI-compatible API.
+    RemoteGroq,
     /// Deterministic offline provider used for tests, demos and CI.
     Mock,
 }
@@ -25,6 +27,7 @@ impl ModelMode {
             "REMOTE_OPENAI" | "OPENAI" => Self::RemoteOpenAi,
             "REMOTE_GEMINI" | "GEMINI" => Self::RemoteGemini,
             "REMOTE_ANTHROPIC" | "ANTHROPIC" => Self::RemoteAnthropic,
+            "REMOTE_GROQ" | "GROQ" => Self::RemoteGroq,
             "MOCK" => Self::Mock,
             _ => Self::Local,
         }
@@ -69,6 +72,8 @@ pub struct LlmConfig {
     pub mode: ModelMode,
     pub ollama_base_url: String,
     pub ollama_model: String,
+    /// Context window requested from Ollama (its default is only 4096 tokens).
+    pub ollama_num_ctx: u32,
     pub openai_api_key: Option<String>,
     pub openai_model: String,
     pub openai_base_url: String,
@@ -78,9 +83,22 @@ pub struct LlmConfig {
     pub anthropic_api_key: Option<String>,
     pub anthropic_model: String,
     pub anthropic_base_url: String,
+    pub groq_api_key: Option<String>,
+    pub groq_model: String,
+    pub groq_base_url: String,
     pub timeout: Duration,
     /// When a remote provider fails, retry the request on local Ollama.
     pub fallback_to_local: bool,
+    /// When a remote provider fails, first try the other cloud providers that
+    /// have an API key (only applies when MODEL_MODE is a cloud mode).
+    pub fallback_cloud: bool,
+    /// LLM second-opinion review of drafts: Some(true/false) or None = auto
+    /// (on for cloud models, off for local Ollama where it costs a full call).
+    pub review: Option<bool>,
+    /// Max concurrent LLM calls; 0 = auto (1 for local Ollama, 4 otherwise).
+    pub max_parallel: usize,
+    /// How long Ollama keeps the model loaded between calls.
+    pub ollama_keep_alive: String,
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +108,24 @@ pub struct TelegramConfig {
     pub chat_id: Option<i64>,
     pub api_base: String,
     pub poll_timeout_secs: u64,
+}
+
+impl TelegramConfig {
+    /// Why the bot token can't be right, if it obviously can't. BotFather
+    /// tokens look like `<numeric bot id>:<35-char secret>`. Never echoes it.
+    pub fn token_problem(&self) -> Option<&'static str> {
+        let t = self.bot_token.as_deref()?.trim();
+        let Some((id, secret)) = t.split_once(':') else {
+            return Some("TELEGRAM_BOT_TOKEN has no '<bot id>:' prefix; paste the complete token from BotFather (it looks like 123456789:AA...)");
+        };
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+            return Some("TELEGRAM_BOT_TOKEN must start with the numeric bot id followed by ':'");
+        }
+        if secret.len() < 30 || !secret.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Some("TELEGRAM_BOT_TOKEN secret part after ':' looks truncated or has extra characters");
+        }
+        None
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +160,8 @@ pub struct ResearchConfig {
     pub recruiter_enabled: bool,
     pub recruiter_linkedin_enabled: bool,
     pub recruiter_daily_limit: u32,
+    /// Start applications for jobs found by discovery (requires the job agent).
+    pub auto_apply: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +179,8 @@ pub struct Config {
     pub max_attachment_bytes: u64,
     pub workflow_version: u32,
     pub max_retries: u32,
+    /// Mail older than this is recorded but not sent to the LLM (0 = no limit).
+    pub max_email_age_hours: u64,
     pub llm: LlmConfig,
     pub telegram: TelegramConfig,
     pub jobs: JobConfig,
@@ -223,11 +263,12 @@ impl Config {
             mode: ModelMode::parse(&s_or("MODEL_MODE", "LOCAL")),
             ollama_base_url: s_or("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
             ollama_model: s_or("OLLAMA_MODEL", "qwen2.5:7b"),
+            ollama_num_ctx: num("OLLAMA_NUM_CTX", 8192)?.clamp(2048, 131_072) as u32,
             openai_api_key: s("OPENAI_API_KEY"),
             openai_model: s_or("OPENAI_MODEL", "gpt-4o-mini"),
             openai_base_url: s_or("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             gemini_api_key: s("GEMINI_API_KEY"),
-            gemini_model: s_or("GEMINI_MODEL", "gemini-2.0-flash"),
+            gemini_model: s_or("GEMINI_MODEL", "gemini-flash-latest"),
             gemini_base_url: s_or(
                 "GEMINI_BASE_URL",
                 "https://generativelanguage.googleapis.com/v1beta",
@@ -235,8 +276,18 @@ impl Config {
             anthropic_api_key: s("ANTHROPIC_API_KEY"),
             anthropic_model: s_or("ANTHROPIC_MODEL", "claude-haiku-5-5"),
             anthropic_base_url: s_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"),
+            groq_api_key: s("GROQ_API_KEY"),
+            groq_model: s_or("GROQ_MODEL", "openai/gpt-oss-20b"),
+            groq_base_url: s_or("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
             timeout: Duration::from_secs(num("LLM_TIMEOUT_SECS", 90)?),
             fallback_to_local: b("LLM_FALLBACK_TO_LOCAL", true),
+            fallback_cloud: b("LLM_FALLBACK_CLOUD", true),
+            review: match s("LLM_REVIEW").map(|v| v.to_ascii_lowercase()).as_deref() {
+                None | Some("auto") => None,
+                Some(v) => Some(parse_bool(v)),
+            },
+            max_parallel: num("LLM_MAX_PARALLEL", 0)? as usize,
+            ollama_keep_alive: s_or("OLLAMA_KEEP_ALIVE", "24h"),
         };
 
         let chat_id = match s("TELEGRAM_CHAT_ID") {
@@ -310,6 +361,7 @@ impl Config {
             recruiter_enabled: b("RECRUITER_DISCOVERY_ENABLED", false),
             recruiter_linkedin_enabled: b("RECRUITER_LINKEDIN_ENABLED", false),
             recruiter_daily_limit: num("RECRUITER_DAILY_LIMIT", 20)? as u32,
+            auto_apply: b("RESEARCH_AUTO_APPLY", false),
         };
 
         let max_concurrency = num("EH_MAX_CONCURRENCY", 10)?.clamp(1, 256) as usize;
@@ -328,11 +380,17 @@ impl Config {
             max_attachment_bytes: num("EH_MAX_ATTACHMENT_BYTES", 25 * 1024 * 1024)?,
             workflow_version: num("EH_WORKFLOW_VERSION", 1)? as u32,
             max_retries: num("EH_MAX_RETRIES", 3)? as u32,
+            max_email_age_hours: num("EH_MAX_EMAIL_AGE_HOURS", 72)?,
             llm,
             telegram,
             jobs,
             research,
         })
+    }
+
+    /// Whether drafts get an LLM second-opinion review (see `LlmConfig::review`).
+    pub fn llm_review_enabled(&self) -> bool {
+        self.llm.review.unwrap_or(self.llm.mode != ModelMode::Local)
     }
 
     /// Telegram is usable only when enabled *and* fully configured.
@@ -385,6 +443,7 @@ mod tests {
         assert!(!c.jobs.enabled);
         assert_eq!(c.jobs.submit_mode, SubmitMode::Review);
         assert!(!c.research.enabled);
+        assert!(!c.research.auto_apply);
         assert_eq!(c.max_concurrency, 10);
         assert_eq!(c.research.search_terms.len(), DEFAULT_SEARCH_TERMS.len());
         assert!(!c.telegram_active());
@@ -427,6 +486,11 @@ mod tests {
     #[test]
     fn telegram_requires_token_and_chat() {
         let c = cfg(&[("TELEGRAM_ENABLED", "true"), ("TELEGRAM_BOT_TOKEN", "x")]).unwrap();
+        assert!(c.telegram.token_problem().is_some());
+        let ok = cfg(&[("TELEGRAM_BOT_TOKEN", "123456789:AAdummyabcdefghijklmnopqrstuvwxyz01234")]).unwrap();
+        assert_eq!(ok.telegram.token_problem(), None);
+        let no_id = cfg(&[("TELEGRAM_BOT_TOKEN", "AAdummyabcdefghijklmnopqrstuvwxyz01234")]).unwrap();
+        assert!(no_id.telegram.token_problem().unwrap().contains("prefix"));
         assert!(!c.telegram_active());
         let c = cfg(&[
             ("TELEGRAM_ENABLED", "true"),

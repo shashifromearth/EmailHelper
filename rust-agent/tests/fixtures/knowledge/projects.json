@@ -1,0 +1,22 @@
+[
+  {
+    "name": "rag-bench",
+    "description": "Open-source benchmark for retrieval-augmented generation pipelines",
+    "tech": [
+      "Python",
+      "PyTorch",
+      "FAISS"
+    ],
+    "url": "https://github.com/asha-rao-example/rag-bench"
+  },
+  {
+    "name": "tokio-vector",
+    "description": "Async vector search service in Rust",
+    "tech": [
+      "Rust",
+      "Tokio",
+      "gRPC"
+    ],
+    "url": ""
+  }
+]

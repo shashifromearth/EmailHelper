@@ -149,7 +149,16 @@ pub fn spawn(app: Arc<App>) -> Option<tokio::task::JoinHandle<()>> {
                     for u in updates {
                         offset = offset.max(u.update_id + 1);
                         let Some(msg) = u.message else { continue };
-                        if msg.chat.id != client.chat_id {
+                        // One bot serves everyone: the default chat plus any
+                        // person's own chat from people.json.
+                        let allowed = msg.chat.id == client.chat_id
+                            || app
+                                .knowledge
+                                .people()
+                                .persons
+                                .iter()
+                                .any(|p| p.telegram_chat_id == Some(msg.chat.id));
+                        if !allowed {
                             tracing::warn!(
                                 chat_id = msg.chat.id,
                                 "ignoring message from unauthorised chat"
@@ -163,14 +172,20 @@ pub fn spawn(app: Arc<App>) -> Option<tokio::task::JoinHandle<()>> {
                         match handle_message(&app, &msg).await {
                             Ok(Some(reply)) => {
                                 app.notifier
-                                    .send(Event::Reply, &reply, Some(msg.message_id))
+                                    .send_in(
+                                        Some(msg.chat.id),
+                                        Event::Reply,
+                                        &reply,
+                                        Some(msg.message_id),
+                                    )
                                     .await;
                             }
                             Ok(None) => {}
                             Err(e) => {
                                 tracing::error!(error = %e, "failed to handle telegram message");
                                 app.notifier
-                                    .send(
+                                    .send_in(
+                                        Some(msg.chat.id),
                                         Event::Error,
                                         "Sorry, that failed. Check the agent logs.",
                                         Some(msg.message_id),

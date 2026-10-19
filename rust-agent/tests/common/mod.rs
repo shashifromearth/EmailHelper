@@ -36,7 +36,7 @@ impl Drop for TestAgent {
 }
 
 pub fn knowledge_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../knowledge")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/knowledge")
 }
 
 pub struct Builder {
@@ -194,7 +194,7 @@ pub fn email(account: &str, msg_id: &str, from: &str, subject: &str, body: &str)
         "to": [format!("{account}@example.com")],
         "cc": [],
         "subject": subject,
-        "date": "2026-10-18T09:30:00Z",
+        "date": chrono::Utc::now().to_rfc3339(),
         "body_text": body,
         "attachments": []
     })

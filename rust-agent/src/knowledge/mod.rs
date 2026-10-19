@@ -1,6 +1,8 @@
 //! Local knowledge base: the user's profile plus SQLite FTS5 retrieval over
 //! every markdown, text and JSON file in the knowledge directory.
 
+pub mod docx;
+pub mod people;
 pub mod profile;
 
 use std::path::{Path, PathBuf};
@@ -11,12 +13,50 @@ use sha2::{Digest, Sha256};
 use crate::db::knowledge::{self as kdb, Snippet};
 use crate::db::Db;
 use crate::error::AppResult;
+pub use people::{People, Person, Route};
 pub use profile::Profile;
 
 pub struct KnowledgeBase {
     dir: PathBuf,
     db: Db,
-    profile: RwLock<Arc<Profile>>,
+    people: RwLock<Arc<People>>,
+}
+
+/// Restricts retrieval to one person (and optionally one purpose) plus
+/// `shared/`. The default scope searches everything (legacy mode).
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    /// Index prefix of the person's folder ("people/<id>"); None = everything.
+    pub person_dir: Option<String>,
+    pub purpose: Option<String>,
+}
+
+impl Scope {
+    pub fn for_person(p: &Person, purpose: Option<&str>) -> Self {
+        Self {
+            person_dir: (!p.rel_dir.is_empty()).then(|| p.rel_dir.clone()),
+            purpose: purpose.map(str::to_string),
+        }
+    }
+
+    pub fn allows(&self, path: &str) -> bool {
+        let Some(pd) = &self.person_dir else {
+            return true;
+        };
+        if path.starts_with("shared/") {
+            return true;
+        }
+        let Some(rest) = path.strip_prefix(&format!("{pd}/")) else {
+            return false;
+        };
+        if !rest.contains('/') {
+            return true; // person-level files (profile, resume.md, ...)
+        }
+        match &self.purpose {
+            Some(purpose) => rest.starts_with(&format!("{purpose}/")),
+            None => true,
+        }
+    }
 }
 
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -24,23 +64,28 @@ const CHUNK_CHARS: usize = 900;
 
 impl KnowledgeBase {
     pub fn new(dir: PathBuf, db: Db) -> Self {
-        let profile = Arc::new(Profile::load(&dir));
+        let people = Arc::new(People::load(&dir));
         Self {
             dir,
             db,
-            profile: RwLock::new(profile),
+            people: RwLock::new(people),
         }
+    }
+
+    pub fn people(&self) -> Arc<People> {
+        self.people
+            .read()
+            .map(|p| p.clone())
+            .unwrap_or_else(|e| e.into_inner().clone())
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
+    /// The default person's profile (legacy mode: the only profile).
     pub fn profile(&self) -> Arc<Profile> {
-        self.profile
-            .read()
-            .map(|p| p.clone())
-            .unwrap_or_else(|e| e.into_inner().clone())
+        self.people().default_person().profile.clone()
     }
 
     /// Re-index changed files and reload the profile. Cheap when nothing changed
@@ -72,11 +117,22 @@ impl KnowledgeBase {
             if matches!(existing, Some((m, _)) if m == mtime) {
                 continue;
             }
-            let raw = match tokio::fs::read_to_string(&path).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(file = %rel, error = %e, "unreadable knowledge file");
-                    continue;
+            let raw = if kind_of(&path) == "docx" {
+                let p2 = path.clone();
+                match tokio::task::spawn_blocking(move || docx::extract_text(&p2)).await? {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(file = %rel, error = %e, "unreadable docx");
+                        continue;
+                    }
+                }
+            } else {
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(file = %rel, error = %e, "unreadable knowledge file");
+                        continue;
+                    }
                 }
             };
             let mut h = Sha256::new();
@@ -96,17 +152,42 @@ impl KnowledgeBase {
         let removed = self.db.call(move |c| kdb::prune(c, &keep)).await?;
         if changed > 0 || removed > 0 {
             tracing::info!(changed, removed, "knowledge index updated");
-            let p = Arc::new(Profile::load(&self.dir));
-            if let Ok(mut w) = self.profile.write() {
-                *w = p;
-            }
+            self.reload_people();
         }
         Ok(changed)
     }
 
+    /// Re-read people.json and every person's files.
+    pub fn reload_people(&self) {
+        let p = Arc::new(People::load(&self.dir));
+        if let Ok(mut w) = self.people.write() {
+            *w = p;
+        }
+    }
+
     pub async fn search(&self, query: &str, limit: usize) -> AppResult<Vec<Snippet>> {
+        self.search_scoped(query, limit, &Scope::default()).await
+    }
+
+    /// Search within one person's (and purpose's) knowledge plus `shared/`.
+    pub async fn search_scoped(
+        &self,
+        query: &str,
+        limit: usize,
+        scope: &Scope,
+    ) -> AppResult<Vec<Snippet>> {
         let q = query.to_string();
-        self.db.call(move |c| kdb::search(c, &q, limit)).await
+        let fetch = if scope.person_dir.is_some() {
+            limit * 8
+        } else {
+            limit
+        };
+        let hits = self.db.call(move |c| kdb::search(c, &q, fetch)).await?;
+        Ok(hits
+            .into_iter()
+            .filter(|h| scope.allows(&h.path))
+            .take(limit)
+            .collect())
     }
 }
 
@@ -121,6 +202,7 @@ fn kind_of(p: &Path) -> &'static str {
     match p.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "json" => "json",
         "txt" => "text",
+        "docx" => "docx",
         _ => "markdown",
     }
 }
@@ -135,14 +217,18 @@ fn collect_files(dir: &Path) -> Vec<PathBuf> {
         for entry in rd.flatten() {
             let p = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
+            // Private facts are never indexed (they must not reach prompts).
+            if name.starts_with('.')
+                || name.eq_ignore_ascii_case("private.json")
+                || name.eq_ignore_ascii_case("private")
+            {
                 continue;
             }
             if p.is_dir() {
                 stack.push(p);
             } else if matches!(
                 p.extension().and_then(|e| e.to_str()),
-                Some("md" | "markdown" | "txt" | "json")
+                Some("md" | "markdown" | "txt" | "json" | "docx")
             ) {
                 out.push(p);
             }
@@ -161,6 +247,7 @@ pub fn chunk_document(rel: &str, kind: &str, raw: &str) -> Vec<(String, String)>
         .trim_end_matches(".md")
         .trim_end_matches(".json")
         .trim_end_matches(".txt")
+        .trim_end_matches(".docx")
         .replace(['_', '-'], " ");
     let text = if kind == "json" {
         match serde_json::from_str::<serde_json::Value>(raw) {
@@ -287,5 +374,41 @@ mod tests {
         std::fs::remove_file(dir.path().join("faq.md")).unwrap();
         kb.reindex().await.unwrap();
         assert!(kb.search("shipping", 3).await.unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn scope_filters_paths() {
+        let s = Scope {
+            person_dir: Some("people/shashi".into()),
+            purpose: Some("job_seeking".into()),
+        };
+        assert!(s.allows("people/shashi/profile.json"));
+        assert!(s.allows("people/shashi/job_seeking/replies/recruiting.md"));
+        assert!(!s.allows("people/shashi/consulting/rates.md"));
+        assert!(!s.allows("people/himanshu/profile.json"));
+        assert!(s.allows("shared/household.md"));
+        assert!(Scope::default().allows("anything/at/all.md"));
+    }
+
+    #[tokio::test]
+    async fn private_json_is_never_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("private.json"), r#"{"pan": "ABCDE1234F"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("notes.md"),
+            "# Notes
+PAN card questions go to the secure channel.",
+        )
+        .unwrap();
+        let kb = KnowledgeBase::new(dir.path().to_path_buf(), Db::open_in_memory().unwrap());
+        kb.reindex().await.unwrap();
+        let hits = kb.search("ABCDE1234F pan", 5).await.unwrap();
+        assert!(hits.iter().all(|h| !h.content.contains("ABCDE1234F")));
+        assert!(hits.iter().any(|h| h.path == "notes.md"));
     }
 }

@@ -32,6 +32,11 @@
 
 ## Email workflow
 
+One Thunderbird can hold mailboxes for a whole household. `knowledge/people.json`
+maps each mailbox to a person and its purposes (job seeking, consulting,
+freelancing…); drafts are written as that person, from that mailbox, using only
+that person's knowledge. See [KNOWLEDGE.md](KNOWLEDGE.md).
+
 ```
 New mail (Thunderbird) ─► POST /emails ─► idempotency key email:{account}:{message-id}:v{N}
    ─► processing_jobs row (queued) ─► dispatcher (semaphore = EH_MAX_CONCURRENCY)
@@ -91,7 +96,8 @@ retryable. The job:
 3. Filters by search terms, scores every job against the resume, de-duplicates
    by fingerprint, stores the results in `jobs` and sends a Telegram summary
    of the top N.
-4. Starts applications for non-skip jobs when the job agent is enabled.
+4. Starts applications for non-skip jobs only when both `JOB_AGENT_ENABLED`
+   and `RESEARCH_AUTO_APPLY` are on.
 
 Recruiter discovery runs for every recruiting or job email when enabled. It:
 

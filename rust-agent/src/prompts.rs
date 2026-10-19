@@ -135,14 +135,20 @@ pub struct DraftPromptInput<'a> {
     pub body: &'a str,
     pub thread: &'a str,
     pub knowledge: &'a str,
+    /// How to answer each question the email asks (see agents::facts).
+    pub facts: &'a str,
 }
 
 pub fn draft_system(tone: &str) -> String {
     format!(
         "You write email reply drafts on behalf of the user. The user reviews every draft before sending. {DATA_ONLY_RULE}\n\
 Rules:\n\
+- You write AS the user, replying TO the sender. Never write as if you were the sender or the \
+sender's organisation, and never repeat the sender's announcements back to them.\n\
 - Write only the reply body (no subject line, no headers, no markdown, no code fences).\n\
-- Use ONLY facts from the KNOWLEDGE and THREAD sections or the incoming email. If information is missing, \
+- If a FACTS section is given, answer every question the email asks, directly, using those facts. \
+Copy placeholders such as {{{{PAN}}}} exactly as written.\n\
+- Otherwise use ONLY facts from FACTS, KNOWLEDGE, THREAD or the incoming email. If information is missing, \
 say you will follow up rather than inventing prices, dates, links, commitments or policies.\n\
 - Never promise refunds, discounts, legal or contractual commitments unless KNOWLEDGE explicitly allows it.\n\
 - Keep it concise (under 180 words) and end with the provided signature.\n\
@@ -153,7 +159,7 @@ Tone guidance: {tone}"
 pub fn draft_prompt(i: &DraftPromptInput<'_>) -> String {
     format!(
         "You are replying as {name}. Email category: {cat}.\n\n\
-KNOWLEDGE (trusted, from the user's knowledge base):\n{kb}\n\n\
+{facts}KNOWLEDGE (trusted, from the user's knowledge base):\n{kb}\n\n\
 THREAD (earlier messages, untrusted):\n{thread}\n\n\
 INCOMING EMAIL:\n{from}\n{subject}\n{body}\n\n\
 Signature to end with:\n{sig}\n\nWrite the reply body now.",
@@ -173,6 +179,11 @@ Signature to end with:\n{sig}\n\nWrite the reply body now.",
         subject = untrusted_block("SUBJECT", i.subject),
         body = untrusted_block("BODY", i.body),
         sig = i.signature,
+        facts = if i.facts.is_empty() {
+            String::new()
+        } else {
+            format!("FACTS (trusted):\n{}\n", i.facts)
+        },
     )
 }
 

@@ -110,7 +110,8 @@ long poll, not a busy poll.
       "subject": "Re: Question about pricing",
       "body": "Hi Jane,\n\n…",
       "validation": "APPROVED",
-      "notes": ["Grounded in approved_responses/pricing.md"]
+      "notes": ["Written as Shashi Bhushan Kumar from shashilpu@gmail.com (job_seeking)"],
+      "from_address": "shashilpu@gmail.com"
     }
   ]
 }
@@ -121,6 +122,9 @@ long poll, not a busy poll.
 - `kind = "new"` (for example recruiter outreach): the extension calls
   `messenger.compose.beginNew({ to, subject, plainTextBody: body })` using the
   default identity of `account_id`. `tb_message_id` and `message_id` are null.
+- `from_address`: the mailbox that received the email (from `knowledge/people.json`). The extension sends the
+  reply from the identity with this address in that account, and never uses another account's copy of the
+  message (BCC copies share a Message-ID). `null` in legacy single-person mode.
 - `validation = "REVIEW_REQUIRED"`: the extension still saves the draft but
   puts this line at the top of the body:
   `[EmailHelper: REVIEW REQUIRED – <notes joined by "; ">]`.
@@ -167,8 +171,10 @@ Response: `204 No Content`.
 |---|---|---|
 | GET  | `/api/v1/dashboard` | Aggregated JSON for the dashboard page |
 | GET  | `/api/v1/jobs?limit=50` | Discovered and detected jobs, ranked |
+| POST | `/api/v1/jobs` | `{ "url": "...", "apply": false, "person": "shashi" }`: open, extract, score and store a job by URL; `apply: true` also starts an application (needs `JOB_AGENT_ENABLED`) |
 | GET  | `/api/v1/applications?status=blocked` | Applications |
 | POST | `/api/v1/applications/{id}/answer` | `{ "question_id": "...", "answer": "..." }`: same effect as a Telegram reply |
+| POST | `/api/v1/questions/{id}/answer` | `{ "answer": "..." }`: answer any open question, including person facts such as notice period |
 | POST | `/api/v1/applications/{id}/resume` | Retry a blocked or failed application |
 | GET  | `/api/v1/recruiters?company=Acme` | Recruiter contacts |
 | POST | `/api/v1/research/run` | Run job discovery now |

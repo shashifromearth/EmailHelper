@@ -20,6 +20,11 @@ pub struct Identity {
     pub github_url: String,
     pub portfolio_url: String,
     pub work_authorization: String,
+    /// Countries the user may work in without sponsorship, e.g. ["India"].
+    /// Derived from `work_authorization` when empty.
+    pub authorized_countries: Vec<String>,
+    /// Whether the user needs visa sponsorship to work *outside*
+    /// `authorized_countries`.
     pub requires_sponsorship: Option<bool>,
     pub notice_period: String,
     pub willing_to_relocate: Option<bool>,
@@ -54,6 +59,9 @@ pub struct SalaryPreferences {
     pub expected_text: String,
     pub current_text: String,
     pub negotiable: bool,
+    /// e.g. "60 days", "Immediate". Overrides profile.json's notice_period.
+    pub notice_period: String,
+    pub last_working_day: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -148,7 +156,26 @@ impl Profile {
             identity.first_name = parts.next().unwrap_or("").to_string();
             identity.last_name = parts.collect::<Vec<_>>().join(" ");
         }
-        let employment: Vec<Employment> = read_json(dir, "employment_history.json");
+        let mut employment: Vec<Employment> = read_json(dir, "employment_history.json");
+        // Per-person layout: job-search specifics live in job_seeking/.
+        let js = dir.join("job_seeking");
+        let mut salary: SalaryPreferences = read_json(dir, "salary_preferences.json");
+        if js.join("salary.json").exists() {
+            salary = read_json(&js, "salary.json");
+        } else if js.join("salary_preferences.json").exists() {
+            salary = read_json(&js, "salary_preferences.json");
+        }
+        let preferences: Preferences = if js.join("preferences.json").exists() {
+            read_json(&js, "preferences.json")
+        } else {
+            read_json(dir, "preferences.json")
+        };
+        if !salary.notice_period.trim().is_empty() {
+            identity.notice_period = salary.notice_period.clone();
+        }
+        if employment.is_empty() && js.join("employment_history.json").exists() {
+            employment = read_json(&js, "employment_history.json");
+        }
         if identity.current_company.is_empty() {
             if let Some(e) = employment.first() {
                 identity.current_company = e.company.clone();
@@ -161,8 +188,8 @@ impl Profile {
             identity,
             resume: read_json(dir, "resume.json"),
             skills: read_json(dir, "skills.json"),
-            salary: read_json(dir, "salary_preferences.json"),
-            preferences: read_json(dir, "preferences.json"),
+            salary,
+            preferences,
             employment,
             education: read_json(dir, "education.json"),
             projects: read_json(dir, "projects.json"),
@@ -173,11 +200,50 @@ impl Profile {
         }
     }
 
+    /// Canonical names of countries the user is authorized to work in.
+    pub fn authorized_countries(&self) -> Vec<&'static str> {
+        let explicit: Vec<&'static str> = self
+            .identity
+            .authorized_countries
+            .iter()
+            .flat_map(|c| countries_in(c))
+            .collect();
+        if !explicit.is_empty() {
+            return explicit;
+        }
+        let from_text = countries_in(&self.identity.work_authorization);
+        if !from_text.is_empty() {
+            return from_text;
+        }
+        let wa = self.identity.work_authorization.trim().to_lowercase();
+        if wa.starts_with("yes") {
+            return countries_in(&self.identity.country);
+        }
+        Vec::new()
+    }
+
     pub fn display_name(&self) -> &str {
         if self.identity.full_name.is_empty() {
             "the user"
         } else {
             &self.identity.full_name
+        }
+    }
+
+    /// Signature for drafts written as `name` (the profile signature if set).
+    pub fn signature_for(&self, name: &str) -> String {
+        if !self.identity.signature.is_empty() {
+            return self.identity.signature.clone();
+        }
+        let n = if self.identity.full_name.is_empty() {
+            name
+        } else {
+            &self.identity.full_name
+        };
+        if n.is_empty() || n == "the user" {
+            "Best regards".to_string()
+        } else {
+            format!("Best regards,\n{n}")
         }
     }
 
@@ -242,19 +308,79 @@ impl Profile {
     }
 }
 
+/// (canonical name, lowercase aliases matched as whole words)
+const COUNTRIES: &[(&str, &[&str])] = &[
+    ("India", &["india", "indian"]),
+    (
+        "United States",
+        &["united states", "usa", "u.s.", "america"],
+    ),
+    (
+        "United Kingdom",
+        &["united kingdom", "uk", "britain", "england"],
+    ),
+    ("Canada", &["canada"]),
+    ("Germany", &["germany"]),
+    ("Netherlands", &["netherlands"]),
+    ("Ireland", &["ireland"]),
+    ("France", &["france"]),
+    ("European Union", &["european union", "eu", "europe", "eea"]),
+    ("Singapore", &["singapore"]),
+    ("Australia", &["australia"]),
+    (
+        "United Arab Emirates",
+        &["united arab emirates", "uae", "dubai"],
+    ),
+    ("Japan", &["japan"]),
+];
+
+/// Countries mentioned in free text (whole-word, case-insensitive).
+pub fn countries_in(text: &str) -> Vec<&'static str> {
+    let t = text.to_lowercase();
+    COUNTRIES
+        .iter()
+        .filter(|(_, aliases)| {
+            aliases
+                .iter()
+                .any(|a| crate::jobs::extract::contains_word(&t, a))
+        })
+        .map(|(name, _)| *name)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn loads_sample_knowledge() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../knowledge");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/knowledge");
         let p = Profile::load(&dir);
         assert!(!p.identity.full_name.is_empty());
         assert!(!p.identity.first_name.is_empty());
         assert!(!p.skills.core.is_empty());
         assert!(!p.preferences.target_roles.is_empty());
         assert!(p.signature().contains(&p.identity.first_name) || !p.identity.signature.is_empty());
+    }
+
+    #[test]
+    fn authorized_countries_are_derived() {
+        let mut p = Profile::default();
+        p.identity.work_authorization = "India".into();
+        assert_eq!(p.authorized_countries(), vec!["India"]);
+        p.identity.work_authorization = "Yes".into();
+        p.identity.country = "India".into();
+        assert_eq!(p.authorized_countries(), vec!["India"]);
+        p.identity.authorized_countries = vec!["UK".into(), "India".into()];
+        assert_eq!(p.authorized_countries(), vec!["United Kingdom", "India"]);
+        assert_eq!(
+            countries_in("Are you authorized to work in the United States?"),
+            vec!["United States"]
+        );
+        assert!(
+            countries_in("Tell us about your work").is_empty(),
+            "'us' as a pronoun is ambiguous"
+        );
     }
 
     #[test]

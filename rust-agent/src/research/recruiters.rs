@@ -55,8 +55,12 @@ pub fn rank(title: &str, company: &str) -> i64 {
     s.min(100)
 }
 
-async fn outreach_draft(app: &App, r: &Recruiter, role_hint: &str) -> String {
-    let p = app.knowledge.profile();
+async fn outreach_draft(
+    app: &App,
+    p: &crate::knowledge::Profile,
+    r: &Recruiter,
+    role_hint: &str,
+) -> String {
     let req = LlmRequest::new(
         LlmTask::Outreach,
         format!(
@@ -130,6 +134,12 @@ pub async fn discover_for_email(app: &Arc<App>, email_id: &str) -> AppResult<()>
         .as_ref()
         .and_then(|s| s.company_hint.clone())
         .or_else(|| detect::company_from_domain(&e.from_email));
+    let eid = e.id.clone();
+    let pid = app.db.call(move |c| emails::person_of(c, &eid)).await?;
+    let Some(person) = crate::jobs::person_by_id(app, pid.as_deref()) else {
+        tracing::info!(email_id, "recruiter discovery skipped: unassigned mailbox");
+        return Ok(());
+    };
     let Some(company) = company else {
         tracing::info!(
             email_id,
@@ -235,7 +245,7 @@ pub async fn discover_for_email(app: &Arc<App>, email_id: &str) -> AppResult<()>
     let mut new_contacts = Vec::new();
     for (i, mut r) in found.into_iter().enumerate() {
         if i < 3 {
-            r.outreach_draft = Some(outreach_draft(app, &r, &role_hint).await);
+            r.outreach_draft = Some(outreach_draft(app, &person.profile, &r, &role_hint).await);
         }
         let r2 = r.clone();
         let (rid, is_new) = app.db.call(move |c| jdb::upsert_recruiter(c, &r2)).await?;
@@ -265,8 +275,13 @@ pub async fn discover_for_email(app: &Arc<App>, email_id: &str) -> AppResult<()>
                     ),
                     body: body.clone(),
                     validation: "REVIEW_REQUIRED".into(),
-                    notes: vec!["Recruiter outreach draft".into()],
+                    notes: vec![format!(
+                        "Recruiter outreach draft, written as {}",
+                        person.name
+                    )],
                     confidence: None,
+                    from_address: e.account_email.clone(),
+                    person_id: crate::jobs::person_id_of(&person),
                     llm_provider: None,
                     llm_model: None,
                 };

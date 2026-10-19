@@ -54,7 +54,8 @@ Then edit `.env`. At minimum, set `EH_API_TOKEN` to a long random string, for ex
 python -c "import secrets; print(secrets.token_hex(24))"
 ```
 
-Then fill in your profile under `knowledge/`: `profile.json`,
+Then create your private knowledge folder with `cp -r knowledge.example knowledge`. It is git-ignored, so your
+personal data is never committed. Fill in your profile under `knowledge/`: `profile.json`,
 `resume.json`, `skills.json`, `preferences.json` and the other files.
 Replace `company_profile.md`, `tone.md` and `approved_responses/*.md` with
 your own content.

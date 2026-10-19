@@ -4,12 +4,16 @@ use emailhelper::app::{App, AppOverrides};
 use emailhelper::config::{Config, LogFormat};
 use tracing_subscriber::EnvFilter;
 
-const USAGE: &str = "emailhelper [serve|migrate|discover-now|reindex|healthcheck|version]
+const USAGE: &str =
+    "emailhelper [serve|migrate|discover-now|reindex|telegram-chats|telegram-test|llm-test|healthcheck|version]
 
   serve         Run the agent (default)
   migrate       Create/upgrade the SQLite schema and exit
   discover-now  Run one research discovery pass and exit
   reindex       Re-index the knowledge directory and exit
+  telegram-chats  List chats that messaged the bot (to fill TELEGRAM_CHAT_ID / people.json)
+  telegram-test   Check the bot token and send a test message to TELEGRAM_CHAT_ID
+  llm-test        Send a one-line test prompt to every configured model provider
   healthcheck   Exit 0 if the running agent reports healthy (for Docker/systemd)
   version       Print the version
 
@@ -119,9 +123,17 @@ async fn main() -> ExitCode {
         }
     };
     init_tracing(cfg.log_format);
+    if cfg.telegram.enabled {
+        if let Some(problem) = cfg.telegram.token_problem() {
+            tracing::warn!(problem, "Telegram is enabled but the bot token is malformed; notifications will fail");
+        }
+    }
 
     match cmd.as_str() {
         "healthcheck" => healthcheck(&cfg).await,
+        "telegram-chats" => telegram_chats(&cfg).await,
+        "telegram-test" => telegram_test(&cfg).await,
+        "llm-test" => llm_test(&cfg).await,
         "migrate" => match emailhelper::db::Db::open(&cfg.database_path) {
             Ok(_) => {
                 tracing::info!(path = %cfg.database_path.display(), "database ready");
@@ -218,6 +230,163 @@ async fn serve(app: std::sync::Arc<App>) -> ExitCode {
         }
         Err(e) => {
             tracing::error!(error = %e, "server error");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// List chats that have messaged the bot, so their ids can go into
+/// TELEGRAM_CHAT_ID / people.json. Reads the token from the environment; the
+/// token itself is never printed.
+async fn telegram_test(cfg: &Config) -> ExitCode {
+    let Some(token) = cfg.telegram.bot_token.as_deref() else {
+        eprintln!("Set TELEGRAM_BOT_TOKEN in .env first.");
+        return ExitCode::from(2);
+    };
+    if let Some(problem) = cfg.telegram.token_problem() {
+        eprintln!("{problem}");
+        return ExitCode::from(2);
+    }
+    let chat = cfg.telegram.chat_id.unwrap_or(0);
+    let client = emailhelper::telegram::TelegramClient::new(
+        reqwest::Client::new(),
+        &cfg.telegram.api_base,
+        token.trim(),
+        chat,
+    );
+    match client.get_me().await {
+        Ok(name) => println!("Bot token OK: @{name}"),
+        Err(e) => {
+            eprintln!("Bot token rejected: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    if chat == 0 {
+        eprintln!("TELEGRAM_CHAT_ID is not set; send /start to the bot, then run `emailhelper telegram-chats`.");
+        return ExitCode::from(2);
+    }
+    match client
+        .send("EmailHelper test: Telegram notifications are working.", None)
+        .await
+    {
+        Ok(_) => {
+            println!("Test message sent to chat {chat}.");
+            if !cfg.telegram.enabled {
+                println!("Note: TELEGRAM_ENABLED is false, so the agent won't use Telegram yet.");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Sending to chat {chat} failed: {e} (has that account sent /start to the bot?)");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn llm_test(cfg: &Config) -> ExitCode {
+    use emailhelper::config::ModelMode;
+    use emailhelper::llm::{LlmRequest, LlmRouter, LlmTask};
+    let http = reqwest::Client::builder()
+        .timeout(cfg.llm.timeout)
+        .build()
+        .unwrap_or_default();
+    let metrics = std::sync::Arc::new(emailhelper::metrics::Metrics::new());
+    println!("MODEL_MODE primary: {:?}", cfg.llm.mode);
+    let mut failed = false;
+    for (mode, has_key) in [
+        (ModelMode::RemoteGroq, cfg.llm.groq_api_key.is_some()),
+        (ModelMode::RemoteGemini, cfg.llm.gemini_api_key.is_some()),
+        (ModelMode::RemoteOpenAi, cfg.llm.openai_api_key.is_some()),
+        (ModelMode::RemoteAnthropic, cfg.llm.anthropic_api_key.is_some()),
+        (ModelMode::Local, true),
+    ] {
+        if !has_key {
+            continue;
+        }
+        let mut c = cfg.llm.clone();
+        c.mode = mode;
+        c.fallback_cloud = false;
+        c.fallback_to_local = false;
+        let router = LlmRouter::from_config(&c, http.clone(), metrics.clone());
+        let started = std::time::Instant::now();
+        let mut req = LlmRequest::new(
+            LlmTask::Summarize,
+            "You are a test endpoint.",
+            "Reply with exactly the word OK.",
+        );
+        req.max_tokens = 10;
+        match router.complete(&req).await {
+            Ok(r) => println!(
+                "  ok    {}:{}  {:.1}s  -> {:?}",
+                r.provider,
+                r.model,
+                started.elapsed().as_secs_f64(),
+                r.text.trim().chars().take(40).collect::<String>()
+            ),
+            Err(e) => {
+                failed = true;
+                println!("  FAIL  {}:{}  {e}", router.provider_name(), router.model_name());
+            }
+        }
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+async fn telegram_chats(cfg: &Config) -> ExitCode {
+    let Some(token) = cfg.telegram.bot_token.as_deref() else {
+        eprintln!("Set TELEGRAM_BOT_TOKEN in .env first.");
+        return ExitCode::from(2);
+    };
+    let client = emailhelper::telegram::TelegramClient::new(
+        reqwest::Client::new(),
+        &cfg.telegram.api_base,
+        token,
+        0,
+    );
+    // offset 0 + timeout 0: peek at pending updates without consuming them.
+    match client.get_updates(0, 0).await {
+        Ok(updates) => {
+            let mut seen = std::collections::BTreeMap::new();
+            for u in updates {
+                if let Some(m) = u.message {
+                    let c = m.chat;
+                    let name = c
+                        .title
+                        .clone()
+                        .or_else(|| {
+                            let n = format!(
+                                "{} {}",
+                                c.first_name.clone().unwrap_or_default(),
+                                c.last_name.clone().unwrap_or_default()
+                            );
+                            (!n.trim().is_empty()).then(|| n.trim().to_string())
+                        })
+                        .unwrap_or_else(|| "-".into());
+                    let user = c
+                        .username
+                        .clone()
+                        .map(|u| format!("@{u}"))
+                        .unwrap_or_default();
+                    seen.insert(c.id, format!("{name} {user}").trim().to_string());
+                }
+            }
+            if seen.is_empty() {
+                println!("No messages yet. Ask each person to open the bot in Telegram and send /start, then run this again.");
+                println!("(If the agent is running with Telegram enabled it consumes messages; stop it first.)");
+            } else {
+                println!("chat_id\tname");
+                for (id, name) in seen {
+                    println!("{id}\t{name}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Telegram request failed: {e}");
             ExitCode::FAILURE
         }
     }

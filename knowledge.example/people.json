@@ -1,0 +1,41 @@
+{
+  "people": [
+    {
+      "id": "asha",
+      "name": "Asha Rao",
+      "mailboxes": [
+        {
+          "address": "asha.jobs@example.com",
+          "purposes": [
+            "job_seeking"
+          ]
+        },
+        {
+          "address": "asha.consulting@example.com",
+          "purposes": [
+            "consulting"
+          ]
+        }
+      ],
+      "job_agent": true,
+      "telegram_chat_id": null
+    },
+    {
+      "id": "ravi",
+      "name": "Ravi Rao",
+      "mailboxes": [
+        {
+          "address": "ravi@example.com",
+          "purposes": [
+            "freelancing",
+            "consulting"
+          ]
+        }
+      ],
+      "job_agent": false,
+      "telegram_chat_id": null
+    }
+  ],
+  "unassigned_mailboxes": "classify_only",
+  "research_person": "asha"
+}

@@ -337,32 +337,7 @@ pub const COMMON_SKILLS: &[&str] = &[
 pub fn enrich_from_text(d: &mut JobDetails, text: &str, skill_vocab: &[String]) {
     let lower = text.to_lowercase();
     if d.remote.is_none() {
-        d.remote = Some(
-            if lower.contains("fully remote")
-                || lower.contains("100% remote")
-                || lower.contains("remote-first")
-                || lower.contains("(remote)")
-                || lower.contains("work from home")
-                || lower.contains("remote ")
-            {
-                if lower.contains("hybrid") {
-                    "hybrid"
-                } else {
-                    "remote"
-                }
-            } else if lower.contains("hybrid") {
-                "hybrid"
-            } else if lower.contains("on-site")
-                || lower.contains("onsite")
-                || lower.contains("in office")
-                || lower.contains("in-office")
-            {
-                "onsite"
-            } else {
-                "unknown"
-            }
-            .to_string(),
-        );
+        d.remote = Some(remote_mode(d.location.as_deref().unwrap_or(""), &lower).to_string());
     }
     if d.experience_years.is_none() {
         static R: OnceLock<Regex> = OnceLock::new();
@@ -405,6 +380,59 @@ pub fn enrich_from_text(d: &mut JobDetails, text: &str, skill_vocab: &[String]) 
         if contains_word(&lower, &s.to_lowercase()) {
             d.skills.push(s);
         }
+    }
+}
+
+/// Work mode from the location field first (most reliable), then from strong
+/// phrases in the description. A bare mention of "remote" in a description
+/// ("remote work policy", "remote teams") is not enough.
+pub fn remote_mode(location: &str, lower_text: &str) -> &'static str {
+    let loc = location.to_lowercase();
+    if loc.contains("remote") {
+        return if loc.contains("hybrid") {
+            "hybrid"
+        } else {
+            "remote"
+        };
+    }
+    if loc.contains("hybrid") {
+        return "hybrid";
+    }
+    const STRONG_REMOTE: &[&str] = &[
+        "fully remote",
+        "100% remote",
+        "remote-first",
+        "remote first",
+        "(remote)",
+        "remote (",
+        "work from home",
+        "remote role",
+        "remote position",
+        "remote opportunity",
+        "this role is remote",
+        "this is a remote",
+        "location: remote",
+        "remote-friendly",
+        "work remotely",
+        "- remote",
+        "remote -",
+        "remote, ",
+    ];
+    if STRONG_REMOTE.iter().any(|p| lower_text.contains(p)) || lower_text.starts_with("remote") {
+        if lower_text.contains("hybrid") {
+            "hybrid"
+        } else {
+            "remote"
+        }
+    } else if lower_text.contains("hybrid") {
+        "hybrid"
+    } else if ["on-site", "onsite", "in office", "in-office"]
+        .iter()
+        .any(|p| lower_text.contains(p))
+    {
+        "onsite"
+    } else {
+        "unknown"
     }
 }
 
@@ -558,6 +586,21 @@ mod tests {
         assert_eq!(
             split_title("Rust Engineer at Globex | Careers"),
             ("Rust Engineer".into(), Some("Globex".into()))
+        );
+    }
+
+    #[test]
+    fn remote_mode_prefers_location_and_strong_phrases() {
+        assert_eq!(
+            remote_mode("Tokyo, Japan", "we support remote teams across time zones"),
+            "unknown"
+        );
+        assert_eq!(remote_mode("Bangalore - Remote", "build systems"), "remote");
+        assert_eq!(remote_mode("", "this is a fully remote role"), "remote");
+        assert_eq!(remote_mode("", "hybrid, 3 days in office"), "hybrid");
+        assert_eq!(
+            remote_mode("Berlin", "on-site in our berlin office"),
+            "onsite"
         );
     }
 }

@@ -22,7 +22,10 @@ pub struct Db {
     conn: Arc<Mutex<Connection>>,
 }
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("migrations/001_init.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("migrations/001_init.sql")),
+    (2, include_str!("migrations/002_people.sql")),
+];
 
 impl Db {
     /// Open (creating if needed) the database file and run migrations.
@@ -172,6 +175,7 @@ mod tests {
             "answer_memory",
             "interviews",
             "research_findings",
+            "person_facts",
         ] {
             let t2 = t.to_string();
             let exists: bool = db

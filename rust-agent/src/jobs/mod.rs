@@ -58,14 +58,14 @@ pub async fn fetch_page(app: &App, url: &str) -> AppResult<ExtractedPage> {
 /// Score a job, store it, and return `(record, decision, is_new)`.
 pub async fn score_and_store(
     app: &App,
+    person: &crate::knowledge::Person,
     source: &str,
     source_ref: Option<String>,
     details: JobDetails,
 ) -> AppResult<(jdb::JobRecord, Decision, bool)> {
-    let profile = app.knowledge.profile();
     let m = matcher::score(
         &details,
-        &profile,
+        &person.profile,
         app.cfg.jobs.auto_apply_threshold,
         app.cfg.jobs.review_threshold,
     );
@@ -74,6 +74,7 @@ pub async fn score_and_store(
     let source = source.to_string();
     let decision = m.decision;
     let score = m.score as i64;
+    let person_id = person_id_of(person);
     let (id, is_new) = app
         .db
         .call(move |c| {
@@ -87,12 +88,28 @@ pub async fn score_and_store(
                     breakdown: &breakdown,
                     decision: decision.as_str(),
                     reasons: &reasons,
+                    person_id: person_id.as_deref(),
                 },
             )
         })
         .await?;
     let rec = app.db.call(move |c| jdb::get_job(c, &id)).await?;
     Ok((rec, decision, is_new))
+}
+
+/// Person id stored on jobs/applications (None in legacy single-person mode).
+pub fn person_id_of(p: &crate::knowledge::Person) -> Option<String> {
+    (!p.rel_dir.is_empty()).then(|| p.id.clone())
+}
+
+/// The person a stored email/job belongs to (the only person in legacy mode).
+pub fn person_by_id(app: &App, id: Option<&str>) -> Option<Arc<crate::knowledge::Person>> {
+    let people = app.knowledge.people();
+    match id {
+        Some(id) => people.person(id),
+        None if people.legacy => Some(people.default_person()),
+        None => None,
+    }
 }
 
 /// Queue handler for `job_email`: process every job link in an email.
@@ -102,7 +119,17 @@ pub async fn process_job_email(app: &Arc<App>, email_id: &str) -> AppResult<()> 
     let Some(signal) = detect::detect_job_email(&e) else {
         return Ok(());
     };
-    let vocab = app.knowledge.profile().all_skills();
+    let eid = e.id.clone();
+    let pid = app.db.call(move |c| emails::person_of(c, &eid)).await?;
+    let Some(person) = person_by_id(app, pid.as_deref()) else {
+        tracing::info!(
+            email_id,
+            "job email for an unassigned mailbox; not processed"
+        );
+        return Ok(());
+    };
+    let tag = crate::telegram::format::person_tag(&person.name, e.account_email.as_deref());
+    let vocab = person.profile.all_skills();
     let mut handled = 0usize;
     for link in signal.links.iter().take(MAX_LINKS_PER_EMAIL) {
         let page = match fetch_page(app, &link.url).await {
@@ -132,14 +159,15 @@ pub async fn process_job_email(app: &Arc<App>, email_id: &str) -> AppResult<()> 
             d.company = signal.company_hint.clone();
         }
         let (job, decision, is_new) =
-            score_and_store(app, &signal.source, Some(e.id.clone()), d).await?;
+            score_and_store(app, &person, &signal.source, Some(e.id.clone()), d).await?;
         handled += 1;
         if is_new {
             app.notifier
-                .notify(
+                .notify_person(
+                    person.telegram_chat_id,
                     Event::JobFound,
                     &format!(
-                        "💼 Job Found\nCompany: {}\nRole: {}\nScore: {}/100 → {}\nURL: {}{}",
+                        "{tag}\n💼 Job Found\nCompany: {}\nRole: {}\nScore: {}/100 → {}\nURL: {}{}",
                         job.details.company.as_deref().unwrap_or("-"),
                         job.details.title,
                         job.score.unwrap_or(0),
@@ -162,9 +190,16 @@ pub async fn process_job_email(app: &Arc<App>, email_id: &str) -> AppResult<()> 
             json!({ "email_id": e.id, "score": job.score, "decision": decision.as_str(), "url": link.url }),
         )
         .await;
-        if decision != Decision::Skip && app.cfg.jobs.enabled {
+        if decision != Decision::Skip && app.cfg.jobs.enabled && person.job_agent {
             let apply_url = link.url.clone();
-            application::start(app, &job, &apply_url).await?;
+            match application::start(app, &job, &apply_url).await {
+                Ok(_) => {}
+                // A profile problem is a configuration issue, not a retryable failure.
+                Err(crate::error::AppError::Validation(reason)) => {
+                    tracing::warn!(job_id = %job.id, %reason, "application not started");
+                }
+                Err(e) => return Err(e),
+            }
         } else if decision == Decision::Skip {
             let jid = job.id.clone();
             app.db
@@ -177,8 +212,15 @@ pub async fn process_job_email(app: &Arc<App>, email_id: &str) -> AppResult<()> 
 }
 
 /// Track interviews and recruiter responses (called from the email pipeline).
-pub async fn track_recruiting_email(app: &Arc<App>, e: &EmailRecord, c: &Classification) {
+pub async fn track_recruiting_email(
+    app: &Arc<App>,
+    e: &EmailRecord,
+    c: &Classification,
+    person: &crate::knowledge::Person,
+    mailbox: Option<&str>,
+) {
     let Some(sig) = &c.job_signal else { return };
+    let tag = crate::telegram::format::person_tag(&person.name, mailbox);
     match sig.kind {
         SignalKind::InterviewInvite => {
             let (eid, company, subject) =
@@ -191,10 +233,11 @@ pub async fn track_recruiting_email(app: &Arc<App>, e: &EmailRecord, c: &Classif
                 tracing::error!(error = %err, "failed to record interview");
             }
             app.notifier
-                .notify(
+                .notify_person(
+                    person.telegram_chat_id,
                     Event::InterviewRequest,
                     &format!(
-                        "📅 Interview Request Received\nFrom: {}\nSubject: {}\nCompany: {}",
+                        "{tag}\n📅 Interview Request Received\nFrom: {}\nSubject: {}\nCompany: {}",
                         e.from,
                         e.subject,
                         sig.company_hint.as_deref().unwrap_or("-")
@@ -204,10 +247,11 @@ pub async fn track_recruiting_email(app: &Arc<App>, e: &EmailRecord, c: &Classif
         }
         SignalKind::RecruiterOutreach | SignalKind::Referral if e.in_reply_to.is_some() => {
             app.notifier
-                .notify(
+                .notify_person(
+                    person.telegram_chat_id,
                     Event::RecruiterResponse,
                     &format!(
-                        "📨 Recruiter Response Received\nFrom: {}\nSubject: {}",
+                        "{tag}\n📨 Recruiter Response Received\nFrom: {}\nSubject: {}",
                         e.from, e.subject
                     ),
                 )

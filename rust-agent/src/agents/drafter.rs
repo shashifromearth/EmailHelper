@@ -48,7 +48,46 @@ pub fn clean_body(raw: &str) -> String {
                 || l.starts_with("here's")
         })
         .collect();
-    lines.join("\n").trim().to_string()
+    move_leading_signoff(lines.join("\n").trim())
+}
+
+/// If the text *starts* with a sign-off block ("Best regards,\nName"),
+/// move that block to the end.
+pub fn move_leading_signoff(text: &str) -> String {
+    const SIGNOFFS: &[&str] = &[
+        "best regards",
+        "kind regards",
+        "warm regards",
+        "regards",
+        "best",
+        "thanks",
+        "thank you",
+        "sincerely",
+        "cheers",
+        "many thanks",
+    ];
+    let mut lines = text.lines();
+    let first = lines
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches([',', '.', '!'])
+        .to_lowercase();
+    if !SIGNOFFS.contains(&first.as_str()) {
+        return text.to_string();
+    }
+    let all: Vec<&str> = text.lines().collect();
+    let end = all
+        .iter()
+        .position(|l| l.trim().is_empty())
+        .unwrap_or(all.len());
+    let (signoff, rest) = all.split_at(end);
+    let rest = rest.join("\n");
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return text.to_string();
+    }
+    format!("{rest}\n\n{}", signoff.join("\n").trim())
 }
 
 pub async fn generate(
@@ -56,8 +95,9 @@ pub async fn generate(
     e: &EmailRecord,
     c: &Classification,
     ctx: &ContextBundle,
+    facts: &str,
 ) -> AppResult<Draft> {
-    let body = prompts::sanitize_untrusted(&e.body_text, 6000);
+    let body = prompts::sanitize_untrusted(&e.body_text, 3000);
     let from = prompts::sanitize_untrusted(&e.from, 300);
     let subject = prompts::sanitize_untrusted(&e.subject, 300);
     let input = DraftPromptInput {
@@ -70,13 +110,14 @@ pub async fn generate(
         body: &body.text,
         thread: &ctx.thread_text,
         knowledge: &ctx.knowledge_text,
+        facts,
     };
     let req = LlmRequest::new(
         LlmTask::Draft,
         prompts::draft_system(&ctx.tone),
         prompts::draft_prompt(&input),
     )
-    .max_tokens(700);
+    .max_tokens(350);
     let resp = llm.complete(&req).await?;
     let mut text = clean_body(&resp.text);
     // Ensure the signature is present exactly once at the end.
@@ -110,5 +151,13 @@ mod tests {
             "Hello there"
         );
         assert_eq!(clean_body("Here is the reply:\nHi Jane"), "Hi Jane");
+        assert_eq!(
+            clean_body("Best regards,\nAsha Rao\n\nThanks for writing. I will reply soon."),
+            "Thanks for writing. I will reply soon.\n\nBest regards,\nAsha Rao"
+        );
+        assert_eq!(
+            clean_body("Best of luck with the launch!"),
+            "Best of luck with the launch!"
+        );
     }
 }

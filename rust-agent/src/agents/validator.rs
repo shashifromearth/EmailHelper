@@ -109,7 +109,7 @@ pub fn rule_checks(i: &ValidationInput<'_>) -> Vec<String> {
         notes.push(format!("response too long ({word_count} words)"));
     }
     static PLACEHOLDER: OnceLock<Regex> = OnceLock::new();
-    if re(&PLACEHOLDER, r"(?i)\[(your|insert|recipient|company|name|date)[^\]]*\]|\{\{[^}]*\}\}|<insert|lorem ipsum|xx/xx")
+    if re(&PLACEHOLDER, r"(?i)\[[^\]\n]{0,40}\b(your|insert|recipient|company|organi[sz]ation|name|date|time|title|address|phone|email|position|role|link|url)\b[^\]\n]{0,40}\]|\{\{[^}]*\}\}|<insert|lorem ipsum|xx/xx")
         .is_match(draft)
     {
         notes.push("contains unfilled placeholder".into());
@@ -185,13 +185,27 @@ struct LlmVerdict {
     confidence: Option<f32>,
 }
 
-pub async fn validate(llm: &LlmRouter, i: &ValidationInput<'_>) -> Validation {
+/// Validate a draft. Rule checks always run; `use_llm` adds a second-opinion
+/// LLM review (off by default for local models, where it costs a full call).
+pub async fn validate(llm: &LlmRouter, i: &ValidationInput<'_>, use_llm: bool) -> Validation {
     let mut notes = rule_checks(i);
     if i.draft.trim().is_empty() {
         return Validation {
             verdict: Verdict::ReviewRequired,
             notes,
             confidence: 0.0,
+        };
+    }
+    if !use_llm {
+        let verdict = if notes.is_empty() {
+            Verdict::Approved
+        } else {
+            Verdict::ReviewRequired
+        };
+        return Validation {
+            verdict,
+            notes,
+            confidence: 0.75,
         };
     }
     let source = prompts::sanitize_untrusted(i.grounding, 6000).text;
@@ -270,6 +284,16 @@ mod tests {
             "",
         ));
         assert!(n.iter().any(|x| x.contains("placeholder")));
+        let n = rule_checks(&input(
+            "Thank you for your interest in [Example Company]. We will be in touch with next steps soon.",
+            "",
+        ));
+        assert!(n.iter().any(|x| x.contains("placeholder")), "{n:?}");
+        let ok = rule_checks(&input(
+            "Thanks for the note about the [RFC] process; I will review it and reply this week.",
+            "[RFC] process",
+        ));
+        assert!(!ok.iter().any(|x| x.contains("placeholder")), "{ok:?}");
     }
 
     #[test]

@@ -39,6 +39,8 @@ pub struct JobRecord {
     pub decision_reasons: Vec<String>,
     pub status: String,
     pub discovered_at: String,
+    /// Person this job was found for (None in legacy single-person mode).
+    pub person_id: Option<String>,
 }
 
 /// Stable identity for a job: normalised URL, else company + title.
@@ -64,6 +66,7 @@ pub struct JobScore<'a> {
     pub breakdown: &'a Value,
     pub decision: &'a str,
     pub reasons: &'a [String],
+    pub person_id: Option<&'a str>,
 }
 
 /// Insert or refresh a job. Returns `(id, is_new)`.
@@ -84,7 +87,8 @@ pub fn upsert(
     {
         c.execute(
             "UPDATE jobs SET score=?2, score_breakdown=?3, decision=?4, decision_reasons=?5,
-                description=COALESCE(?6, description), updated_at=?7 WHERE id=?1",
+                description=COALESCE(?6, description), updated_at=?7,
+                person_id=COALESCE(person_id, ?8) WHERE id=?1",
             params![
                 id,
                 s.score,
@@ -92,7 +96,8 @@ pub fn upsert(
                 s.decision,
                 to_json(&s.reasons),
                 d.description,
-                ts
+                ts,
+                s.person_id
             ],
         )?;
         return Ok((id, false));
@@ -101,8 +106,8 @@ pub fn upsert(
     c.execute(
         "INSERT INTO jobs (id, fingerprint, source, source_ref, company, title, url, location, remote,
             salary, salary_min, salary_max, salary_currency, experience, skills, description, score,
-            score_breakdown, decision, decision_reasons, status, discovered_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,'new',?21,?21)",
+            score_breakdown, decision, decision_reasons, status, discovered_at, updated_at, person_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,'new',?21,?21,?22)",
         params![
             id,
             fp,
@@ -124,7 +129,8 @@ pub fn upsert(
             s.breakdown.to_string(),
             s.decision,
             to_json(&s.reasons),
-            ts
+            ts,
+            s.person_id
         ],
     )?;
     Ok((id, true))
@@ -132,7 +138,7 @@ pub fn upsert(
 
 const JOB_COLS: &str = "id, source, company, title, url, location, remote, salary, salary_min,
     salary_max, salary_currency, experience, skills, description, score, score_breakdown, decision,
-    decision_reasons, status, discovered_at";
+    decision_reasons, status, discovered_at, person_id";
 
 fn map_job(r: &Row<'_>) -> rusqlite::Result<JobRecord> {
     let breakdown: Option<String> = r.get(15)?;
@@ -162,6 +168,7 @@ fn map_job(r: &Row<'_>) -> rusqlite::Result<JobRecord> {
         decision_reasons: from_json(r.get(17)?),
         status: r.get(18)?,
         discovered_at: r.get(19)?,
+        person_id: r.get(20)?,
     })
 }
 
@@ -222,12 +229,16 @@ pub struct ApplicationRecord {
     pub applied_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub person_id: Option<String>,
+    /// Resume file chosen for this application (by tech-stack match).
+    pub resume_file: Option<String>,
 }
 
 const APP_COLS: &str =
     "id, job_id, company, role, url, status, current_step, page_url, ats, fields,
     answers, resume_uploaded, cover_letter, approved, blocker_kind, blocker_detail, attempts,
-    run_seq, score, confirmation_text, screenshot_path, applied_at, created_at, updated_at";
+    run_seq, score, confirmation_text, screenshot_path, applied_at, created_at, updated_at,
+    person_id, resume_file";
 
 fn map_app(r: &Row<'_>) -> rusqlite::Result<ApplicationRecord> {
     let fields: String = r.get(9)?;
@@ -257,6 +268,8 @@ fn map_app(r: &Row<'_>) -> rusqlite::Result<ApplicationRecord> {
         applied_at: r.get(21)?,
         created_at: r.get(22)?,
         updated_at: r.get(23)?,
+        person_id: r.get(24)?,
+        resume_file: r.get(25)?,
     })
 }
 
@@ -276,8 +289,8 @@ pub fn create_application(c: &Connection, job: &JobRecord, url: &str) -> AppResu
     let ts = now();
     c.execute(
         "INSERT INTO applications (id, job_id, company, role, url, status, current_step, score,
-            created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,'pending','created',?6,?7,?7)",
+            created_at, updated_at, person_id)
+         VALUES (?1,?2,?3,?4,?5,'pending','created',?6,?7,?7,?8)",
         params![
             id,
             job.id,
@@ -285,7 +298,8 @@ pub fn create_application(c: &Connection, job: &JobRecord, url: &str) -> AppResu
             job.details.title,
             url,
             job.score,
-            ts
+            ts,
+            job.person_id
         ],
     )?;
     record_status(c, &id, "pending", Some("created"))?;
@@ -347,6 +361,7 @@ pub struct AppUpdate<'a> {
     pub confirmation_text: Option<&'a str>,
     pub screenshot_path: Option<&'a str>,
     pub applied_at: Option<&'a str>,
+    pub resume_file: Option<&'a str>,
     pub bump_attempts: bool,
 }
 
@@ -373,7 +388,8 @@ pub fn update_application(c: &Connection, id: &str, u: &AppUpdate<'_>) -> AppRes
             screenshot_path = COALESCE(?15, screenshot_path),
             applied_at = COALESCE(?16, applied_at),
             attempts = attempts + ?17,
-            updated_at = ?18
+            updated_at = ?18,
+            resume_file = COALESCE(?19, resume_file)
          WHERE id = ?1",
         params![
             id,
@@ -394,6 +410,7 @@ pub fn update_application(c: &Connection, id: &str, u: &AppUpdate<'_>) -> AppRes
             u.applied_at,
             u.bump_attempts as i64,
             now(),
+            u.resume_file,
         ],
     )?;
     if let Some(status) = u.status {
@@ -493,11 +510,41 @@ pub fn create_question(
     reason: &str,
     options: &[String],
 ) -> AppResult<(HumanQuestion, bool)> {
+    create_question_for(c, Some(application_id), field_id, question, reason, options)
+}
+
+/// Ask a person for a missing fact (no application involved).
+/// `field_id` is `fact:<person_id>:<fact>`.
+pub fn create_fact_question(
+    c: &Connection,
+    person_id: &str,
+    fact: &str,
+    question: &str,
+    reason: &str,
+) -> AppResult<(HumanQuestion, bool)> {
+    create_question_for(
+        c,
+        None,
+        &format!("fact:{person_id}:{fact}"),
+        question,
+        reason,
+        &[],
+    )
+}
+
+fn create_question_for(
+    c: &Connection,
+    application_id: Option<&str>,
+    field_id: &str,
+    question: &str,
+    reason: &str,
+    options: &[String],
+) -> AppResult<(HumanQuestion, bool)> {
     if let Some(q) = c
         .query_row(
             &format!(
                 "SELECT {Q_COLS} FROM human_questions
-                 WHERE application_id=?1 AND field_id=?2 AND status='open'"
+                 WHERE application_id IS ?1 AND field_id=?2 AND status='open'"
             ),
             params![application_id, field_id],
             map_q,
@@ -774,6 +821,38 @@ pub fn save_finding(
     Ok(n == 1)
 }
 
+// ---------------------------------------------------------------- person facts
+
+/// Facts a person supplied interactively (Telegram/dashboard), e.g. notice period.
+pub fn person_facts(
+    c: &Connection,
+    person_id: &str,
+) -> AppResult<std::collections::BTreeMap<String, String>> {
+    let mut stmt = c.prepare("SELECT fact, value FROM person_facts WHERE person_id=?1")?;
+    let rows = stmt
+        .query_map([person_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+pub fn set_person_fact(
+    c: &Connection,
+    person_id: &str,
+    fact: &str,
+    value: &str,
+    source: &str,
+) -> AppResult<()> {
+    c.execute(
+        "INSERT INTO person_facts(person_id, fact, value, source, updated_at) VALUES (?1,?2,?3,?4,?5)
+         ON CONFLICT(person_id, fact) DO UPDATE SET value=excluded.value, source=excluded.source,
+            updated_at=excluded.updated_at",
+        params![person_id, fact, value, source, now()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,6 +900,7 @@ mod tests {
                     breakdown: &Value::Null,
                     decision: "apply",
                     reasons: &[],
+                    person_id: None,
                 },
             )?;
             assert!(new);

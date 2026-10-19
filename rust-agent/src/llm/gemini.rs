@@ -35,7 +35,9 @@ impl LlmProvider for GeminiProvider {
     async fn complete(&self, req: &LlmRequest) -> Result<String, LlmError> {
         let mut gen = json!({
             "temperature": req.temperature,
-            "maxOutputTokens": req.max_tokens,
+            // Current Gemini models think first and the thinking counts
+            // against this cap, so leave room for it on top of the answer.
+            "maxOutputTokens": req.max_tokens + 1024,
         });
         if req.json {
             gen["responseMimeType"] = json!("application/json");
@@ -76,7 +78,10 @@ impl LlmProvider for GeminiProvider {
             .as_array()
             .ok_or_else(|| LlmError::BadResponse {
                 provider: "gemini".into(),
-                message: "missing candidates[0].content.parts".into(),
+                message: format!(
+                    "missing candidates[0].content.parts (finishReason {})",
+                    v["candidates"][0]["finishReason"].as_str().unwrap_or("?")
+                ),
             })?;
         Ok(parts
             .iter()

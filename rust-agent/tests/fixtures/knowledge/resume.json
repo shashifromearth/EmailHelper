@@ -1,0 +1,11 @@
+{
+  "headline": "Principal AI Engineer | LLM platforms, RAG, Rust & Python",
+  "summary": "I have spent twelve years building production machine-learning and distributed systems, most recently leading an LLM platform team that shipped retrieval-augmented generation and evaluation infrastructure.",
+  "total_experience_years": 12,
+  "resume_file": "resume.pdf",
+  "achievements": [
+    "Cut LLM inference cost 45% with batching and caching",
+    "Led a 9-person AI platform team",
+    "Designed a Rust-based retrieval service handling 3k QPS"
+  ]
+}

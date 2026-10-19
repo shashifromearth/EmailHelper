@@ -276,6 +276,50 @@ pub fn set_status(c: &Connection, id: &str, status: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Mailboxes that received mail but belong to nobody in people.json.
+pub fn unassigned_mailboxes(c: &Connection) -> AppResult<Vec<serde_json::Value>> {
+    let mut stmt = c.prepare(
+        "SELECT COALESCE(account_email, account_id), COUNT(*), MAX(created_at) FROM emails
+         WHERE person_id IS NULL AND status = 'done' AND account_id != 'live-test'
+         GROUP BY 1 ORDER BY 2 DESC LIMIT 200",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(serde_json::json!({
+                "mailbox": r.get::<_, String>(0)?,
+                "emails": r.get::<_, i64>(1)?,
+                "last_seen": r.get::<_, String>(2)?,
+            }))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Record which person and purpose an email was handled for.
+pub fn set_route(
+    c: &Connection,
+    id: &str,
+    person_id: Option<&str>,
+    purpose: Option<&str>,
+) -> AppResult<()> {
+    c.execute(
+        "UPDATE emails SET person_id=?2, purpose=?3, updated_at=?4 WHERE id=?1",
+        params![id, person_id, purpose, now()],
+    )?;
+    Ok(())
+}
+
+/// Person an email was routed to (if any).
+pub fn person_of(c: &Connection, id: &str) -> AppResult<Option<String>> {
+    Ok(
+        c.query_row("SELECT person_id FROM emails WHERE id=?1", [id], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .optional()?
+        .flatten(),
+    )
+}
+
 pub fn set_classification(
     c: &Connection,
     id: &str,

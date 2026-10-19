@@ -227,7 +227,23 @@ pub fn score(
     }
     let needs_visa =
         p.preferences.visa_sponsorship_required || p.identity.requires_sponsorship == Some(true);
+    // Visa rules only matter for jobs outside the countries the user can
+    // already work in ("must be authorized to work" is fine in India for an
+    // Indian citizen).
+    let authorized = p.authorized_countries();
+    let where_text =
+        format!("{} {}", job.location.as_deref().unwrap_or(""), job.title).to_lowercase();
+    let in_authorized = crate::knowledge::profile::countries_in(&where_text)
+        .iter()
+        .any(|c| authorized.contains(c))
+        || p.preferences
+            .preferred_locations
+            .iter()
+            .any(|l| !l.is_empty() && where_text.contains(&l.to_lowercase()));
+    let location_known = !job.location.as_deref().unwrap_or("").trim().is_empty();
     if needs_visa
+        && location_known
+        && !in_authorized
         && [
             "no visa sponsorship",
             "unable to sponsor",
@@ -383,9 +399,17 @@ mod tests {
     fn visa_rule() {
         let mut p = profile();
         p.preferences.visa_sponsorship_required = true;
+        p.identity.work_authorization = "India".into();
         let mut j = job();
+        j.location = Some("London, UK".into());
         j.description = Some("Rust Python RAG. We are unable to sponsor visas.".into());
         let m = score(&j, &p, 80, 60);
         assert!(m.skip_reasons.iter().any(|r| r.contains("visa")));
+        // Same wording for a job in India is not a problem for an Indian citizen.
+        j.location = Some("Bengaluru, India".into());
+        j.description =
+            Some("Rust Python RAG. Candidates must be authorized to work in India.".into());
+        let m = score(&j, &p, 80, 60);
+        assert!(!m.skip_reasons.iter().any(|r| r.contains("visa")), "{m:?}");
     }
 }

@@ -127,16 +127,24 @@ async fn ollama_end_to_end_draft() {
         .filter(|r| r.url.path() == "/api/chat")
         .map(|r| serde_json::from_slice(&r.body).unwrap())
         .collect();
-    assert_eq!(chat.len(), 3, "classify + draft + validate");
+    // Local models skip the LLM reviewer (rule checks still run): 2 calls.
+    assert_eq!(chat.len(), 2, "classify + draft");
     assert_eq!(chat[0]["format"], "json", "JSON mode for classification");
     assert!(chat[1].get("format").is_none(), "free text for drafting");
+    assert_eq!(
+        chat[1]["options"]["num_ctx"], 8192,
+        "context window requested"
+    );
+    assert_eq!(chat[1]["keep_alive"], "24h", "model stays loaded");
 }
 
 fn router(cfg_pairs: &[(&str, String)]) -> LlmRouter {
-    let map: std::collections::HashMap<String, String> = cfg_pairs
+    let mut map: std::collections::HashMap<String, String> = cfg_pairs
         .iter()
         .map(|(k, v)| (k.to_string(), v.clone()))
         .collect();
+    // Never fall back to a real local Ollama from a mocked-provider test.
+    map.entry("LLM_FALLBACK_TO_LOCAL".into()).or_insert_with(|| "false".into());
     let cfg = Config::from_lookup(|k| map.get(k).cloned()).unwrap();
     LlmRouter::from_config(&cfg.llm, reqwest::Client::new(), Arc::new(Metrics::new()))
 }
@@ -174,7 +182,7 @@ async fn openai_wire_format() {
 async fn gemini_wire_format_uses_header_key() {
     let s = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
+        .and(path("/v1beta/models/gemini-flash-latest:generateContent"))
         .and(header("x-goog-api-key", "g-test"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "candidates": [{"content": {"parts": [{"text": "Hello "}, {"text": "world"}]}}]
@@ -246,6 +254,7 @@ async fn remote_failure_falls_back_to_ollama() {
         ("OPENAI_API_KEY", "sk".into()),
         ("OPENAI_BASE_URL", remote.uri()),
         ("OLLAMA_BASE_URL", ollama.uri()),
+        ("LLM_FALLBACK_TO_LOCAL", "true".into()),
     ]);
     let resp = r
         .complete(&LlmRequest::new(LlmTask::Draft, "s", "p"))

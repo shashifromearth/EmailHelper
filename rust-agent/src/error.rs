@@ -54,8 +54,16 @@ impl IntoResponse for AppError {
         let (status, code) = self.code();
         // Never leak internal error details to clients; they are logged instead.
         let message = match &self {
-            Self::Validation(m) | Self::NotFound(m) => m.clone(),
-            Self::Unauthorized => "missing or invalid X-EmailHelper-Token".to_string(),
+            Self::Validation(m) => {
+                // Rejected input is otherwise invisible (the client drops it).
+                tracing::warn!(reason = %m, "request rejected: validation failed");
+                m.clone()
+            }
+            Self::NotFound(m) => m.clone(),
+            Self::Unauthorized => {
+                tracing::warn!("request rejected: missing or invalid token");
+                "missing or invalid X-EmailHelper-Token".to_string()
+            }
             other => {
                 tracing::error!(error = %other, "request failed");
                 "internal error".to_string()

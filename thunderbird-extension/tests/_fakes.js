@@ -49,11 +49,26 @@ export function recordingSleep() {
   return fn;
 }
 
-/** Minimal fake of the parts of `messenger` used by drafts.js / ingest.js. */
-export function fakeMessenger({ identities = {}, messages = {}, saveResult = { mode: "draft", messages: [{ id: 5678 }] }, saveError = null, composeIsPlainText = null } = {}) {
+/**
+ * Minimal fake of the parts of `messenger` used by drafts.js / ingest.js.
+ * `identities`: accountId -> default identity. `accountIdentities`: accountId ->
+ * all identities of the account (defaults to [default identity]).
+ * Like Thunderbird, beginReply picks the default identity of the account that
+ * holds the replied-to message; getComposeDetails reports it as identityId.
+ */
+export function fakeMessenger({
+  identities = {},
+  accountIdentities = {},
+  messages = {},
+  saveResult = { mode: "draft", messages: [{ id: 5678 }] },
+  saveError = null,
+  composeIsPlainText = null,
+} = {}) {
   const calls = [];
   let tabSeq = 100;
+  const tabIdentity = new Map(); // tabId -> identityId
   const rec = (name, ...args) => calls.push({ name, args });
+  const listFor = (accountId) => accountIdentities[accountId] || (identities[accountId] ? [identities[accountId]] : []);
   const m = {
     calls,
     identities: {
@@ -61,11 +76,15 @@ export function fakeMessenger({ identities = {}, messages = {}, saveResult = { m
         rec("identities.getDefault", accountId);
         return identities[accountId] || null;
       },
+      async list(accountId) {
+        rec("identities.list", accountId);
+        return listFor(accountId);
+      },
     },
     accounts: {
       async get(accountId) {
         rec("accounts.get", accountId);
-        return { id: accountId, name: `Account ${accountId}`, type: "imap", identities: identities[accountId] ? [identities[accountId]] : [] };
+        return { id: accountId, name: `Account ${accountId}`, type: "imap", identities: listFor(accountId) };
       },
     },
     messages: {
@@ -82,18 +101,27 @@ export function fakeMessenger({ identities = {}, messages = {}, saveResult = { m
     compose: {
       async beginReply(id, type, details) {
         rec("compose.beginReply", id, type, details);
-        return { id: ++tabSeq, windowId: tabSeq + 1000, type: "messageCompose" };
+        const tabId = ++tabSeq;
+        const accountId = messages[id]?.folder?.accountId;
+        if (accountId && identities[accountId]) tabIdentity.set(tabId, identities[accountId].id);
+        return { id: tabId, windowId: tabId + 1000, type: "messageCompose" };
       },
       async beginNew(details) {
         rec("compose.beginNew", details);
-        return { id: ++tabSeq, windowId: tabSeq + 1000, type: "messageCompose" };
+        const tabId = ++tabSeq;
+        if (details?.identityId) tabIdentity.set(tabId, details.identityId);
+        return { id: tabId, windowId: tabId + 1000, type: "messageCompose" };
       },
       async getComposeDetails(tabId) {
         rec("compose.getComposeDetails", tabId);
-        return composeIsPlainText === null ? {} : { isPlainText: composeIsPlainText };
+        const out = {};
+        if (tabIdentity.has(tabId)) out.identityId = tabIdentity.get(tabId);
+        if (composeIsPlainText !== null) out.isPlainText = composeIsPlainText;
+        return out;
       },
       async setComposeDetails(tabId, details) {
         rec("compose.setComposeDetails", tabId, details);
+        if (details?.identityId) tabIdentity.set(tabId, details.identityId);
       },
       async saveMessage(tabId, opts) {
         rec("compose.saveMessage", tabId, opts);

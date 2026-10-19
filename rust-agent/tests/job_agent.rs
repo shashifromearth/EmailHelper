@@ -311,11 +311,17 @@ async fn unknown_question_escalates_and_resumes_after_telegram_reply() {
     // Simulate the user replying to the bot's message.
     let reply = Message {
         message_id: 99,
-        chat: Chat { id: 777 },
+        chat: Chat {
+            id: 777,
+            ..Default::default()
+        },
         text: Some("Functional".into()),
         reply_to_message: Some(Box::new(Message {
             message_id: 4242,
-            chat: Chat { id: 777 },
+            chat: Chat {
+                id: 777,
+                ..Default::default()
+            },
             text: None,
             reply_to_message: None,
         })),
@@ -427,7 +433,10 @@ async fn review_mode_fills_then_waits_for_approval() {
     // An unclear reply is not consent.
     let msg = |text: &str| Message {
         message_id: 1,
-        chat: Chat { id: 777 },
+        chat: Chat {
+            id: 777,
+            ..Default::default()
+        },
         text: Some(text.into()),
         reply_to_message: None,
     };
@@ -473,7 +482,10 @@ async fn skip_reply_abandons_application() {
     wait_status(&env, "awaiting_approval").await;
     let msg = Message {
         message_id: 1,
-        chat: Chat { id: 777 },
+        chat: Chat {
+            id: 777,
+            ..Default::default()
+        },
         text: Some("skip".into()),
         reply_to_message: None,
     };
@@ -641,4 +653,91 @@ async fn low_score_jobs_are_skipped_without_applying() {
         .await
         .unwrap();
     assert!(apps.is_empty(), "no application for skipped job");
+}
+
+#[tokio::test]
+async fn job_can_be_submitted_by_url_and_applied() {
+    let env = setup("auto", json!([]), false).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/apply/fill"))
+        .and(body_partial_json(json!({"submit": true})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "submitted", "final_url": "x", "missing_required": [], "blocker": null
+        })))
+        .mount(&env.worker)
+        .await;
+    let bad = env
+        .agent
+        .post("/api/v1/jobs", &json!({"url": "not a url"}))
+        .await;
+    assert_eq!(bad.status(), 422);
+    let r = env
+        .agent
+        .post("/api/v1/jobs", &json!({"url": JOB_URL, "apply": true}))
+        .await;
+    assert_eq!(r.status(), 201);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["job"]["details"]["title"], "Staff AI Engineer");
+    assert_eq!(v["decision"], "apply");
+    assert!(v["application_id"].is_string());
+    wait_status(&env, "submitted").await;
+    // Same URL again: existing job, no duplicate.
+    let again = env
+        .agent
+        .post("/api/v1/jobs", &json!({"url": JOB_URL}))
+        .await;
+    assert_eq!(again.status(), 200);
+}
+
+#[test]
+fn sample_profile_is_refused() {
+    use emailhelper::jobs::application::profile_problem;
+    let sample = emailhelper::knowledge::Profile::load(
+        &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../knowledge"),
+    );
+    if sample.identity.email.ends_with("@example.com") {
+        assert!(profile_problem(&sample).is_some());
+    }
+    let fixture = emailhelper::knowledge::Profile::load(&knowledge_dir());
+    assert!(profile_problem(&fixture).is_none());
+    assert!(profile_problem(&emailhelper::knowledge::Profile::default()).is_some());
+}
+
+#[tokio::test]
+async fn old_job_alerts_are_counted_but_never_browsed() {
+    let env = setup("auto", json!([]), false).await;
+    let mut e = alert_email();
+    e["message_id"] = json!("<old-alert@linkedin.com>");
+    e["date"] = json!("2021-05-01T08:00:00Z");
+    let r: Value = env
+        .agent
+        .post("/api/v1/emails", &e)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let id = r["email_id"].as_str().unwrap().to_string();
+    wait_for("old alert processed", T, || async {
+        (email_status(&env.agent.app, &id).await == "done").then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let reqs = env.worker.received_requests().await.unwrap();
+    assert!(
+        reqs.iter().all(|r| r.url.path() == "/health"),
+        "worker must not be used for stale mail"
+    );
+    let apps = env
+        .agent
+        .app
+        .db
+        .call(|c| jdb::list_applications(c, None, 10))
+        .await
+        .unwrap();
+    assert!(apps.is_empty());
+    assert!(env
+        .agent
+        .metrics()
+        .await
+        .contains("jobs_detected_total{source=\"linkedin\"} 1"));
 }

@@ -1,16 +1,20 @@
 //! Email workflow orchestration:
-//! classify → (job / recruiter hand-off) → context → draft → validate → store
-//! draft for Thunderbird → notify. Never sends email.
+//! route (mailbox → person + purposes) → classify → choose purpose →
+//! (job / recruiter hand-off) → context (that person + purpose only) →
+//! facts the email asks for → draft as that person → validate → store draft
+//! for Thunderbird (from the receiving mailbox) → notify. Never sends email.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::json;
 
-use crate::agents::{classifier, context, drafter, validator};
+use crate::agents::classifier::{Category, Classification};
+use crate::agents::{classifier, context, drafter, facts, validator};
 use crate::app::App;
-use crate::db::{drafts, emails};
+use crate::db::{drafts, emails, jobs as jdb};
 use crate::error::AppResult;
+use crate::knowledge::people::{Person, CONSULTING, FREELANCING, JOB_SEEKING};
 use crate::queue;
 use crate::telegram::{format, Event};
 
@@ -26,16 +30,28 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
         .call(move |c| emails::set_status(c, &id, "processing"))
         .await?;
 
-    // 1. Classification
-    let cls = classifier::classify(&app.llm, &e).await;
+    // 0. Route: which person owns the receiving mailbox, and what is it for?
+    let people = app.knowledge.people();
+    let route = people.route(e.account_email.as_deref(), &e.to, &e.cc);
+
+    // 1. Classification. Stale mail (e.g. a bulk pass over old unread
+    //    messages) is classified by rules only so it doesn't monopolise the
+    //    local model.
+    let stale = is_stale(e.received_at.as_deref(), app.cfg.max_email_age_hours);
+    let cls = classifier::classify(&app.llm, &e, stale).await;
+    let purpose = choose_purpose(&route.purposes, &cls, &e);
     let cls_json = serde_json::to_string(&cls)?;
     let (id, cat, is_job) = (
         e.id.clone(),
         cls.category.as_str().to_string(),
         cls.is_job_opportunity,
     );
+    let (pid, purp) = (route.person.as_ref().map(|p| p.id.clone()), purpose.clone());
     app.db
-        .call(move |c| emails::set_classification(c, &id, &cat, &cls_json, is_job))
+        .call(move |c| {
+            emails::set_classification(c, &id, &cat, &cls_json, is_job)?;
+            emails::set_route(c, &id, pid.as_deref(), purp.as_deref())
+        })
         .await?;
     app.audit(
         "classifier",
@@ -44,11 +60,21 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
         &e.id,
         json!({ "category": cls.category.as_str(), "confidence": cls.confidence, "method": cls.method,
                 "is_job": cls.is_job_opportunity, "needs_reply": cls.needs_reply,
-                "injection_flags": cls.injection_flags }),
+                "injection_flags": cls.injection_flags,
+                "person": route.person.as_ref().map(|p| p.id.clone()),
+                "mailbox": route.mailbox, "purpose": purpose }),
     )
     .await;
 
-    // 2. Hand-offs to the job and recruiter agents (separate durable jobs).
+    // Mailboxes nobody owns are classified only: no drafts, no job actions.
+    let Some(person) = route.person.clone() else {
+        finish(app, &e, &cls, "unassigned_mailbox", started).await?;
+        return Ok(());
+    };
+
+    // 2. Hand-offs to the job and recruiter agents (separate durable jobs),
+    //    only for people who use the job agent and mail about job seeking.
+    let job_purpose = purpose.as_deref().map(|p| p == JOB_SEEKING).unwrap_or(true);
     if cls.is_job_opportunity {
         if let Some(sig) = &cls.job_signal {
             app.metrics
@@ -56,7 +82,9 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
                 .with_label_values(&[sig.source.as_str()])
                 .inc();
         }
-        if app.cfg.jobs.enabled {
+        // Old mail is only counted: acting on years-old job alerts would
+        // browse stale postings.
+        if app.cfg.jobs.enabled && person.job_agent && job_purpose && !stale {
             app.queue
                 .enqueue(
                     queue::KIND_JOB_EMAIL,
@@ -67,7 +95,7 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
                 )
                 .await?;
         }
-        if app.cfg.research.recruiter_enabled {
+        if app.cfg.research.recruiter_enabled && job_purpose && !stale {
             app.queue
                 .enqueue(
                     queue::KIND_RECRUITER,
@@ -78,16 +106,24 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
                 )
                 .await?;
         }
-        crate::jobs::track_recruiting_email(app, &e, &cls).await;
+        if !stale {
+            crate::jobs::track_recruiting_email(app, &e, &cls, &person, route.mailbox.as_deref())
+                .await;
+        }
     }
 
     if !cls.needs_reply {
-        finish(app, &e, &cls, "no_reply_needed", started).await?;
+        let outcome = if stale {
+            "skipped_old"
+        } else {
+            "no_reply_needed"
+        };
+        finish(app, &e, &cls, outcome, started).await?;
         return Ok(());
     }
 
-    // 3. Context retrieval
-    let ctx = match context::retrieve(app, &e).await {
+    // 3. Context retrieval, scoped to this person and purpose.
+    let ctx = match context::retrieve(app, &e, &person, purpose.as_deref()).await {
         Ok(c) => c,
         Err(err) => {
             app.metrics
@@ -98,8 +134,15 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
         }
     };
 
-    // 4. Draft generation
-    let draft = match drafter::generate(&app.llm, &e, &cls, &ctx).await {
+    // 4. Facts the email asks for (CTC, notice period, DOB, …).
+    let asked = facts::asked(&e.subject, &e.body_text);
+    let pid = person.id.clone();
+    let stored = app.db.call(move |c| jdb::person_facts(c, &pid)).await?;
+    let resume = resume_for_email(&person, &e, purpose.as_deref());
+    let plan = facts::plan(&person, &stored, &asked, resume.as_deref());
+
+    // 5. Draft generation, written as the receiving person.
+    let draft = match drafter::generate(&app.llm, &e, &cls, &ctx, &plan.prompt_section()).await {
         Ok(d) => d,
         Err(err) => {
             app.metrics
@@ -110,26 +153,73 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
         }
     };
 
-    // 5. Validation
+    // 6. Validation runs on the draft with private placeholders masked, so the
+    //    validator (and any LLM reviewer) never sees private values.
+    let grounding = format!("{}\n{}", ctx.grounding, plan.grounding());
+    let masked = plan.mask_tokens(&draft.body);
     let v = validator::validate(
         &app.llm,
         &validator::ValidationInput {
-            draft: &draft.body,
-            grounding: &ctx.grounding,
+            draft: &masked,
+            grounding: &grounding,
             classification_confidence: cls.confidence,
             injection_flags: &cls.injection_flags,
         },
+        app.cfg.llm_review_enabled(),
     )
     .await;
-    if v.verdict == validator::Verdict::ReviewRequired {
+    let (body, private_used) = plan.fill_tokens(&draft.body);
+    let mut verdict = v.verdict;
+    let mut notes = v.notes.clone();
+    if !private_used.is_empty() {
+        verdict = validator::Verdict::ReviewRequired;
+        notes.push(format!(
+            "Contains private details ({}); check before sending",
+            private_used.join(", ")
+        ));
+    }
+    if let Some(file) = &plan.attach_resume {
+        notes.push(format!("Attach resume {file} before sending"));
+    }
+    if verdict == validator::Verdict::ReviewRequired {
         app.metrics.validation_failures_total.inc();
     }
-    let mut notes = v.notes.clone();
+    let unknown = plan.unknown();
+    if !unknown.is_empty() {
+        let refs = ask_person_for_facts(app, &person, route.mailbox.as_deref(), &e, &unknown).await;
+        notes.push(format!(
+            "Asked {} for: {}{}",
+            person.name,
+            unknown
+                .iter()
+                .map(|f| f.label)
+                .collect::<Vec<_>>()
+                .join(", "),
+            if refs.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", refs.join(", "))
+            }
+        ));
+    }
+    notes.push(format!(
+        "Written as {}{}{}",
+        person.name,
+        route
+            .mailbox
+            .as_deref()
+            .map(|m| format!(" from {m}"))
+            .unwrap_or_default(),
+        purpose
+            .as_deref()
+            .map(|p| format!(" ({p})"))
+            .unwrap_or_default()
+    ));
     if !ctx.sources.is_empty() {
         notes.push(format!("Grounded in {}", ctx.sources.join(", ")));
     }
 
-    // 6. Store draft for Thunderbird (the extension saves it; nothing is sent).
+    // 7. Store draft for Thunderbird (the extension saves it; nothing is sent).
     let new = drafts::NewDraft {
         email_id: Some(e.id.clone()),
         kind: "reply".into(),
@@ -138,50 +228,203 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
         message_id: Some(e.message_id.clone()),
         to: vec![e.from_email.clone()],
         subject: draft.subject.clone(),
-        body: draft.body.clone(),
-        validation: v.verdict.as_str().into(),
+        body,
+        validation: verdict.as_str().into(),
         notes: notes.clone(),
         confidence: Some(v.confidence),
         llm_provider: Some(draft.provider.clone()),
         llm_model: Some(draft.model.clone()),
+        from_address: route.mailbox.clone(),
+        person_id: Some(person.id.clone()),
     };
     let draft_id = app.db.call(move |c| drafts::insert(c, &new)).await?;
     app.drafts_ready.notify_waiters();
     app.metrics
         .drafts_created_total
-        .with_label_values(&[v.verdict.as_str()])
+        .with_label_values(&[verdict.as_str()])
         .inc();
     app.audit(
         "drafter",
         "draft_created",
         "draft",
         &draft_id,
-        json!({ "email_id": e.id, "validation": v.verdict.as_str(), "notes": v.notes,
+        json!({ "email_id": e.id, "validation": verdict.as_str(), "notes": notes,
+                "person": person.id, "mailbox": route.mailbox, "purpose": purpose,
+                "facts_asked": asked.iter().map(|f| f.key).collect::<Vec<_>>(),
                 "provider": draft.provider, "model": draft.model, "sources": ctx.sources }),
     )
     .await;
 
-    // 7. Notify
-    let account = e
-        .account_name
-        .clone()
-        .unwrap_or_else(|| e.account_id.clone());
+    // 8. Notify (tagged with whose mailbox it is).
+    let tag = format::person_tag(&person.name, route.mailbox.as_deref());
     app.notifier
-        .notify(
+        .notify_person(
+            person.telegram_chat_id,
             Event::DraftCreated,
-            &format::draft_created(&e.from, &e.subject, &account, &draft_id, v.verdict.as_str()),
+            &format!(
+                "{tag}\n{}",
+                format::draft_created(
+                    &e.from,
+                    &e.subject,
+                    e.account_name
+                        .as_deref()
+                        .or(route.mailbox.as_deref())
+                        .unwrap_or(&e.account_id),
+                    &draft_id,
+                    verdict.as_str()
+                )
+            ),
         )
         .await;
-    if v.verdict == validator::Verdict::ReviewRequired {
+    if verdict == validator::Verdict::ReviewRequired {
         app.notifier
-            .notify(
+            .notify_person(
+                person.telegram_chat_id,
                 Event::ValidationFailed,
-                &format::validation_failed(&e.from, &e.subject, &v.notes),
+                &format!(
+                    "{tag}\n{}",
+                    format::validation_failed(&e.from, &e.subject, &notes)
+                ),
             )
             .await;
     }
 
     finish(app, &e, &cls, "draft_created", started).await
+}
+
+/// Pick the purpose an email is about, among the receiving mailbox's purposes.
+pub fn choose_purpose(
+    purposes: &[String],
+    cls: &Classification,
+    e: &emails::EmailRecord,
+) -> Option<String> {
+    match purposes.len() {
+        0 => return None,
+        1 => return Some(purposes[0].clone()),
+        _ => {}
+    }
+    let has = |p: &str| purposes.iter().any(|x| x == p);
+    if (cls.is_job_opportunity || cls.category == Category::Recruiting) && has(JOB_SEEKING) {
+        return Some(JOB_SEEKING.into());
+    }
+    let text = format!("{}\n{}", e.subject, e.body_text).to_lowercase();
+    let count = |words: &[&str]| words.iter().filter(|w| text.contains(*w)).count();
+    let freelance = count(&[
+        "freelance",
+        "freelancer",
+        "upwork",
+        "fiverr",
+        "toptal",
+        "gig",
+        "hourly rate",
+        "per hour",
+        "fixed price",
+        "fixed-price",
+        "project basis",
+        "short-term project",
+        "milestone",
+    ]);
+    let consulting = count(&[
+        "consulting",
+        "consultant",
+        "consultancy",
+        "advisory",
+        "engagement",
+        "statement of work",
+        "sow",
+        "retainer",
+        "consultation",
+        "architecture review",
+        "assessment",
+    ]);
+    if freelance > consulting && has(FREELANCING) {
+        return Some(FREELANCING.into());
+    }
+    if consulting > 0 && has(CONSULTING) {
+        return Some(CONSULTING.into());
+    }
+    if freelance > 0 && has(FREELANCING) {
+        return Some(FREELANCING.into());
+    }
+    if matches!(cls.category, Category::Sales | Category::Partnership) {
+        if has(CONSULTING) {
+            return Some(CONSULTING.into());
+        }
+        if has(FREELANCING) {
+            return Some(FREELANCING.into());
+        }
+    }
+    Some(purposes[0].clone())
+}
+
+/// The resume to attach when an email asks for one, chosen by the tech stack
+/// the email mentions.
+fn resume_for_email(person: &Person, e: &emails::EmailRecord, purpose: Option<&str>) -> Option<String> {
+    let mut d = crate::db::jobs::JobDetails::default();
+    crate::jobs::extract::enrich_from_text(
+        &mut d,
+        &format!("{}\n{}", e.subject, e.body_text),
+        &person.profile.all_skills(),
+    );
+    person
+        .select_resume(&d.skills, purpose)
+        .map(|(r, _)| r.file_name.clone())
+        .or_else(|| {
+            let f = person.profile.resume.resume_file.trim();
+            (!f.is_empty()).then(|| f.to_string())
+        })
+}
+
+/// Ask the person (Telegram + dashboard) for facts the email needed that we
+/// don't have yet. Returns the question reference codes.
+async fn ask_person_for_facts(
+    app: &Arc<App>,
+    person: &Person,
+    mailbox: Option<&str>,
+    e: &emails::EmailRecord,
+    unknown: &[&'static facts::FactSpec],
+) -> Vec<String> {
+    let mut refs = Vec::new();
+    for f in unknown {
+        let question = format!("What is {}'s {}?", person.name, f.label.to_lowercase());
+        let reason = format!(
+            "asked in \"{}\" from {}",
+            e.subject.chars().take(80).collect::<String>(),
+            e.from_email
+        );
+        let (pid, key, q, r) = (person.id.clone(), f.key, question.clone(), reason.clone());
+        let created = app
+            .db
+            .call(move |c| jdb::create_fact_question(c, &pid, key, &q, &r))
+            .await;
+        let (hq, is_new) = match created {
+            Ok(x) => x,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not create fact question");
+                continue;
+            }
+        };
+        refs.push(hq.ref_code.clone());
+        if is_new {
+            let text = format!(
+                "{}\n❓ Information needed\n{question}\nWhy: {reason}\nRef: {}\n\nReply to this message with the answer. It's saved for future emails.",
+                format::person_tag(&person.name, mailbox),
+                hq.ref_code
+            );
+            if let Some(mid) = app
+                .notifier
+                .notify_person(person.telegram_chat_id, Event::ApprovalRequired, &text)
+                .await
+            {
+                let qid = hq.id.clone();
+                let _ = app
+                    .db
+                    .call(move |c| jdb::set_question_telegram_id(c, &qid, mid))
+                    .await;
+            }
+        }
+    }
+    refs
 }
 
 async fn finish(
@@ -221,4 +464,132 @@ async fn finish(
     )
     .await;
     Ok(())
+}
+
+/// True when `received_at` (RFC 3339) is older than `max_age_hours` (0 = never).
+pub fn is_stale(received_at: Option<&str>, max_age_hours: u64) -> bool {
+    if max_age_hours == 0 {
+        return false;
+    }
+    let Some(ts) = received_at.and_then(|r| chrono::DateTime::parse_from_rfc3339(r).ok()) else {
+        return false;
+    };
+    let age = chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc));
+    age > chrono::Duration::hours(max_age_hours as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staleness() {
+        let old = (chrono::Utc::now() - chrono::Duration::hours(100)).to_rfc3339();
+        let fresh = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(is_stale(Some(&old), 72));
+        assert!(!is_stale(Some(&fresh), 72));
+        assert!(!is_stale(Some(&old), 0), "0 disables the limit");
+        assert!(!is_stale(None, 72), "unknown date is processed");
+        assert!(!is_stale(Some("garbage"), 72));
+    }
+
+    fn cls(cat: Category, job: bool) -> Classification {
+        Classification {
+            category: cat,
+            confidence: 0.9,
+            is_job_opportunity: job,
+            needs_reply: true,
+            urgency: "normal".into(),
+            summary: String::new(),
+            method: "test".into(),
+            job_signal: None,
+            injection_flags: vec![],
+        }
+    }
+
+    fn email(subject: &str, body: &str) -> emails::EmailRecord {
+        emails::EmailRecord {
+            id: "e".into(),
+            account_id: "a".into(),
+            account_name: None,
+            account_email: None,
+            account_type: "gmail".into(),
+            message_id: "<m>".into(),
+            tb_message_id: 1,
+            folder: None,
+            in_reply_to: None,
+            references: vec![],
+            from: "x@y.z".into(),
+            from_email: "x@y.z".into(),
+            to: vec![],
+            cc: vec![],
+            subject: subject.into(),
+            received_at: None,
+            body_text: body.into(),
+            body_html: None,
+            attachments: vec![],
+            category: None,
+            is_job: false,
+            status: "received".into(),
+            created_at: "now".into(),
+        }
+    }
+
+    #[test]
+    fn purpose_selection() {
+        let all: Vec<String> = vec![JOB_SEEKING.into(), CONSULTING.into(), FREELANCING.into()];
+        assert_eq!(
+            choose_purpose(&[], &cls(Category::Support, false), &email("a", "b")),
+            None
+        );
+        assert_eq!(
+            choose_purpose(
+                &[CONSULTING.into()],
+                &cls(Category::Recruiting, true),
+                &email("a", "b")
+            )
+            .as_deref(),
+            Some(CONSULTING),
+            "a single-purpose mailbox is always that purpose"
+        );
+        assert_eq!(
+            choose_purpose(
+                &all,
+                &cls(Category::Recruiting, true),
+                &email("Role", "We are hiring")
+            )
+            .as_deref(),
+            Some(JOB_SEEKING)
+        );
+        assert_eq!(
+            choose_purpose(
+                &all,
+                &cls(Category::Sales, false),
+                &email("Upwork project", "Fixed price project, hourly rate?")
+            )
+            .as_deref(),
+            Some(FREELANCING)
+        );
+        assert_eq!(
+            choose_purpose(
+                &all,
+                &cls(Category::Sales, false),
+                &email(
+                    "Advisory",
+                    "We need a consultant for an architecture review engagement"
+                )
+            )
+            .as_deref(),
+            Some(CONSULTING)
+        );
+        assert_eq!(
+            choose_purpose(
+                &all,
+                &cls(Category::Partnership, false),
+                &email("Hello", "Let's work together")
+            )
+            .as_deref(),
+            Some(CONSULTING)
+        );
+    }
 }

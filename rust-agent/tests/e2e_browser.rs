@@ -66,9 +66,15 @@ async fn apply(a: &TestAgent, url: &str) -> (jdb::ApplicationRecord, Vec<String>
     if d.title.is_empty() {
         d.title = "Staff AI Engineer".into();
     }
-    let (job, _, _) = emailhelper::jobs::score_and_store(&a.app, "e2e", None, d)
-        .await
-        .unwrap();
+    let (job, _, _) = emailhelper::jobs::score_and_store(
+        &a.app,
+        &a.app.knowledge.people().default_person(),
+        "e2e",
+        None,
+        d,
+    )
+    .await
+    .unwrap();
     let id = emailhelper::jobs::application::start(&a.app, &job, url)
         .await
         .unwrap();
@@ -262,7 +268,7 @@ async fn real_browser_applications_against_mock_ats_sites() {
     let blob = gh_sub.to_string();
     assert!(blob.contains("resume.pdf"), "resume uploaded: {blob}");
     assert!(blob.contains("Asha"), "first name submitted: {blob}");
-    assert!(blob.contains("asha.rao@example.com"));
+    assert!(blob.contains("asha.rao@asharao.test"));
 
     let m = a.metrics().await;
     assert_eq!(metric_sum(&m, "applications_completed_total"), 3.0);
