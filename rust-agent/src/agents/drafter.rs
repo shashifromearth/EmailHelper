@@ -53,19 +53,26 @@ pub fn clean_body(raw: &str) -> String {
 
 /// If the text *starts* with a sign-off block ("Best regards,\nName"),
 /// move that block to the end.
+pub const SIGNOFFS: &[&str] = &[
+    "best regards",
+    "kind regards",
+    "warm regards",
+    "regards",
+    "best",
+    "thanks",
+    "thank you",
+    "sincerely",
+    "cheers",
+    "many thanks",
+];
+
+/// Whether a line is a sign-off ("Best regards,").
+pub fn is_signoff(line: &str) -> bool {
+    let l = line.trim().trim_end_matches([',', '.', '!']).to_lowercase();
+    SIGNOFFS.contains(&l.as_str())
+}
+
 pub fn move_leading_signoff(text: &str) -> String {
-    const SIGNOFFS: &[&str] = &[
-        "best regards",
-        "kind regards",
-        "warm regards",
-        "regards",
-        "best",
-        "thanks",
-        "thank you",
-        "sincerely",
-        "cheers",
-        "many thanks",
-    ];
     let mut lines = text.lines();
     let first = lines
         .next()
@@ -90,6 +97,22 @@ pub fn move_leading_signoff(text: &str) -> String {
     format!("{rest}\n\n{}", signoff.join("\n").trim())
 }
 
+/// Shorten a long email to `cap` characters, keeping its start and its end
+/// (recruiters often put the questions after a long job description).
+pub fn head_and_tail(text: &str, cap: usize) -> String {
+    let n = text.chars().count();
+    if n <= cap {
+        return text.to_string();
+    }
+    let head = cap * 2 / 5;
+    let tail = cap - head;
+    let start: String = text.chars().take(head).collect();
+    let end: String = text.chars().skip(n - tail).collect();
+    format!("{start}
+[... middle of the email omitted ...]
+{end}")
+}
+
 pub async fn generate(
     llm: &LlmRouter,
     e: &EmailRecord,
@@ -97,7 +120,10 @@ pub async fn generate(
     ctx: &ContextBundle,
     facts: &str,
 ) -> AppResult<Draft> {
-    let body = prompts::sanitize_untrusted(&e.body_text, 3000);
+    // A local CPU model is slow on long prompts; cloud models read much more.
+    let local = llm.provider_name() == "ollama";
+    let cap = if local { 3000 } else { 12000 };
+    let body = prompts::sanitize_untrusted(&head_and_tail(&e.body_text, cap), cap + 64);
     let from = prompts::sanitize_untrusted(&e.from, 300);
     let subject = prompts::sanitize_untrusted(&e.subject, 300);
     let input = DraftPromptInput {
@@ -117,7 +143,8 @@ pub async fn generate(
         prompts::draft_system(&ctx.tone),
         prompts::draft_prompt(&input),
     )
-    .max_tokens(350);
+    // Room for an item-by-item answer to a recruiter's questionnaire.
+    .max_tokens(if local { 350 } else { 1200 });
     let resp = llm.complete(&req).await?;
     let mut text = clean_body(&resp.text);
     // Ensure the signature is present exactly once at the end.
@@ -136,6 +163,16 @@ pub async fn generate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_emails_keep_start_and_end() {
+        let text = format!("{}QUESTIONS: notice period?", "x".repeat(10_000));
+        let s = head_and_tail(&text, 3000);
+        assert!(s.chars().count() < 3100);
+        assert!(s.ends_with("QUESTIONS: notice period?"));
+        assert!(s.contains("[... middle of the email omitted ...]"));
+        assert_eq!(head_and_tail("short", 3000), "short");
+    }
 
     #[test]
     fn subjects() {

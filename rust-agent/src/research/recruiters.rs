@@ -284,6 +284,7 @@ pub async fn discover_for_email(app: &Arc<App>, email_id: &str) -> AppResult<()>
                     person_id: crate::jobs::person_id_of(&person),
                     llm_provider: None,
                     llm_model: None,
+                    attachments: Vec::new(),
                 };
                 app.db.call(move |c| drafts::insert(c, &d)).await?;
                 app.drafts_ready.notify_waiters();

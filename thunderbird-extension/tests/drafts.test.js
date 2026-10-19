@@ -12,6 +12,7 @@ import {
   createMutex,
   resolveReplyMessageId,
   resolveSenderIdentity,
+  base64ToBytes,
   SAVED_DRAFTS_KEY,
   PENDING_ACKS_KEY,
 } from "../src/drafts.js";
@@ -630,5 +631,52 @@ describe("safety: the extension never sends mail", () => {
     await p.process(replyDraft());
     await p.process(newDraft());
     assert.equal(sent, false);
+  });
+});
+
+describe("attachments", () => {
+  const resume = { name: "Shashi_Resume.docx", content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", data_base64: Buffer.from("PK resume bytes").toString("base64") };
+
+  test("base64ToBytes decodes standard base64", () => {
+    assert.deepEqual(Array.from(base64ToBytes("AAEC/w==")), [0, 1, 2, 255]);
+  });
+
+  test("attachments are added before the draft is saved", async () => {
+    const messenger = fakeMessenger({ identities: { account3: plainIdentity }, messages: original });
+    const { p, api } = makeProcessor({ messenger });
+    const r = await p.process(replyDraft({ attachments: [resume] }));
+    assert.equal(r.status, "saved");
+    const [add] = messenger.find("compose.addAttachment");
+    assert.equal(add.args[1].name, "Shashi_Resume.docx");
+    assert.equal(add.args[1].file.name, "Shashi_Resume.docx");
+    assert.equal(add.args[1].file.type, resume.content_type);
+    assert.equal(Buffer.from(await add.args[1].file.arrayBuffer()).toString(), "PK resume bytes");
+    const names = messenger.names();
+    assert.ok(names.indexOf("compose.addAttachment") < names.indexOf("compose.saveMessage"), "attached before save");
+    assert.equal(api.acks[0].body.error, null);
+  });
+
+  test("a failed attachment still saves the draft and reports a warning in the ack", async () => {
+    const messenger = fakeMessenger({ identities: { account3: plainIdentity }, messages: original, attachError: "boom" });
+    const { p, api, logs } = makeProcessor({ messenger });
+    const r = await p.process(replyDraft({ attachments: [resume] }));
+    assert.equal(r.status, "saved");
+    assert.equal(api.acks[0].body.status, "saved");
+    assert.match(api.acks[0].body.error, /could not attach Shashi_Resume\.docx: boom/);
+    assert.ok(logs.some((l) => l.level === "warn" && /could not attach/.test(l.msg)));
+  });
+
+  test("older Thunderbird without addAttachment: saved with a warning", async () => {
+    const messenger = fakeMessenger({ identities: { account3: plainIdentity }, messages: original, noAddAttachment: true });
+    const { p, api } = makeProcessor({ messenger });
+    await p.process(replyDraft({ attachments: [resume] }));
+    assert.match(api.acks[0].body.error, /no compose\.addAttachment/);
+  });
+
+  test("drafts without attachments never call addAttachment", async () => {
+    const messenger = fakeMessenger({ identities: { account3: plainIdentity }, messages: original });
+    const { p } = makeProcessor({ messenger });
+    await p.process(replyDraft());
+    assert.equal(messenger.find("compose.addAttachment").length, 0);
   });
 });

@@ -27,6 +27,17 @@ pub struct NewDraft {
     /// Mailbox the reply must be sent from (the one that received the email).
     pub from_address: Option<String>,
     pub person_id: Option<String>,
+    /// Absolute paths of files to attach (inside the knowledge folder).
+    pub attachments: Vec<String>,
+}
+
+/// A file sent along with a pending draft for Thunderbird to attach.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DraftAttachment {
+    pub name: String,
+    pub content_type: String,
+    /// File bytes, base64 (standard alphabet).
+    pub data_base64: String,
 }
 
 /// Wire shape returned by `GET /api/v1/drafts/pending` (see documents/API.md).
@@ -43,6 +54,10 @@ pub struct PendingDraft {
     pub validation: String,
     pub notes: Vec<String>,
     pub from_address: Option<String>,
+    /// Filled in by the API handler from `attachment_paths`.
+    pub attachments: Vec<DraftAttachment>,
+    #[serde(skip)]
+    pub attachment_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,8 +81,8 @@ pub fn insert(c: &Connection, d: &NewDraft) -> AppResult<String> {
     c.execute(
         "INSERT INTO drafts (id, email_id, kind, account_id, tb_message_id, message_id, to_addrs,
             subject, body, validation, notes, confidence, status, llm_provider, llm_model,
-            created_at, updated_at, from_address, person_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'pending',?13,?14,?15,?15,?16,?17)",
+            created_at, updated_at, from_address, person_id, attachments)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'pending',?13,?14,?15,?15,?16,?17,?18)",
         params![
             id,
             d.email_id,
@@ -86,6 +101,7 @@ pub fn insert(c: &Connection, d: &NewDraft) -> AppResult<String> {
             ts,
             d.from_address,
             d.person_id,
+            to_json(&d.attachments),
         ],
     )?;
     Ok(id)
@@ -104,6 +120,8 @@ fn map_pending(r: &Row<'_>) -> rusqlite::Result<PendingDraft> {
         validation: r.get(8)?,
         notes: from_json(r.get(9)?),
         from_address: r.get(10)?,
+        attachments: Vec::new(),
+        attachment_paths: from_json(r.get(11)?),
     })
 }
 
@@ -116,7 +134,7 @@ pub fn claim_pending(c: &mut Connection, limit: usize) -> AppResult<Vec<PendingD
     let drafts = {
         let mut stmt = tx.prepare(
             "SELECT id, kind, account_id, tb_message_id, message_id, to_addrs, subject, body,
-                    validation, notes, from_address
+                    validation, notes, from_address, attachments
              FROM drafts
              WHERE status='pending' OR (status='delivered' AND delivered_at < ?1)
              ORDER BY created_at LIMIT ?2",
@@ -161,10 +179,11 @@ pub fn ack(
         .ok_or_else(|| AppError::NotFound(format!("draft {id}")))?;
     let ts = now();
     if saved {
+        // `error` on a saved draft is a warning (e.g. attachment missing).
         c.execute(
-            "UPDATE drafts SET status='saved', tb_draft_message_id=?2, error=NULL,
+            "UPDATE drafts SET status='saved', tb_draft_message_id=?2, error=?4,
                 delivery_attempts=delivery_attempts+1, updated_at=?3 WHERE id=?1",
-            params![id, tb_draft_message_id, ts],
+            params![id, tb_draft_message_id, ts, error],
         )?;
         return Ok(AckOutcome::Saved);
     }

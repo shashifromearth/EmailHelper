@@ -111,7 +111,14 @@ long poll, not a busy poll.
       "body": "Hi Jane,\n\n…",
       "validation": "APPROVED",
       "notes": ["Written as Shashi Bhushan Kumar from shashilpu@gmail.com (job_seeking)"],
-      "from_address": "shashilpu@gmail.com"
+      "from_address": "shashilpu@gmail.com",
+      "attachments": [
+        {
+          "name": "Shashi_Resume_GOLANG_PYTHON_AWS_GenAI_Architect.docx",
+          "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "data_base64": "UEsDBBQ…"
+        }
+      ]
     }
   ]
 }
@@ -125,6 +132,11 @@ long poll, not a busy poll.
 - `from_address`: the mailbox that received the email (from `knowledge/people.json`). The extension sends the
   reply from the identity with this address in that account, and never uses another account's copy of the
   message (BCC copies share a Message-ID). `null` in legacy single-person mode.
+- `attachments`: files to attach before saving, usually the resume chosen
+  for the job when the email asks for one. The extension adds each file with
+  `messenger.compose.addAttachment`. Only files inside the knowledge folder are
+  sent, up to 10 MB each. If a file can't be attached, the draft is still
+  saved and the ack carries a warning.
 - `validation = "REVIEW_REQUIRED"`: the extension still saves the draft but
   puts this line at the top of the body:
   `[EmailHelper: REVIEW REQUIRED – <notes joined by "; ">]`.
@@ -142,7 +154,9 @@ without an ack it is handed out again.
 ```
 
 `status` is `saved` or `failed`. On `failed`, include `error`; the orchestrator
-retries up to 3 times and then marks the draft `failed`.
+retries up to 3 times and then marks the draft `failed`. On `saved`, `error`
+may carry a warning (for example "could not attach resume.docx"); the
+orchestrator logs it and asks the person on Telegram to attach the file.
 
 Response: `204 No Content`.
 

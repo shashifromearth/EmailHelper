@@ -63,6 +63,8 @@ export function fakeMessenger({
   saveResult = { mode: "draft", messages: [{ id: 5678 }] },
   saveError = null,
   composeIsPlainText = null,
+  attachError = null,
+  noAddAttachment = false,
 } = {}) {
   const calls = [];
   let tabSeq = 100;
@@ -123,6 +125,15 @@ export function fakeMessenger({
         rec("compose.setComposeDetails", tabId, details);
         if (details?.identityId) tabIdentity.set(tabId, details.identityId);
       },
+      ...(noAddAttachment
+        ? {}
+        : {
+            async addAttachment(tabId, att) {
+              rec("compose.addAttachment", tabId, att);
+              if (attachError) throw new Error(attachError);
+              return { id: 1, name: att.name };
+            },
+          }),
       async saveMessage(tabId, opts) {
         rec("compose.saveMessage", tabId, opts);
         if (saveError) throw new Error(saveError);

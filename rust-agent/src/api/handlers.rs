@@ -116,7 +116,10 @@ pub async fn pending_drafts(
         let notified = app.drafts_ready.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let list = app.db.call(|c| drafts::claim_pending(c, 10)).await?;
+        let mut list = app.db.call(|c| drafts::claim_pending(c, 10)).await?;
+        for d in &mut list {
+            d.attachments = load_attachments(app.knowledge.dir(), &d.attachment_paths, &d.draft_id).await;
+        }
         if !list.is_empty() || tokio::time::Instant::now() >= deadline {
             return Ok(Json(json!({ "drafts": list })));
         }
@@ -126,6 +129,62 @@ pub async fn pending_drafts(
                 return Ok(Json(json!({ "drafts": [] })));
             }
         }
+    }
+}
+
+/// Largest file sent with a draft.
+const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Read a draft's attachment files. Only files inside the knowledge folder
+/// are sent; anything else is skipped with a warning.
+async fn load_attachments(knowledge: &std::path::Path, paths: &[String], draft_id: &str) -> Vec<drafts::DraftAttachment> {
+    use base64::Engine;
+    let Ok(root) = tokio::fs::canonicalize(knowledge).await else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for p in paths {
+        let Ok(real) = tokio::fs::canonicalize(p).await else {
+            tracing::warn!(draft = draft_id, file = %p, "attachment missing; draft goes without it");
+            continue;
+        };
+        if !real.starts_with(&root) {
+            tracing::warn!(draft = draft_id, file = %p, "attachment outside the knowledge folder; skipped");
+            continue;
+        }
+        match tokio::fs::metadata(&real).await {
+            Ok(m) if m.len() <= MAX_ATTACHMENT_BYTES => {}
+            _ => {
+                tracing::warn!(draft = draft_id, file = %p, "attachment too large or unreadable; skipped");
+                continue;
+            }
+        }
+        let Ok(bytes) = tokio::fs::read(&real).await else {
+            continue;
+        };
+        let name = real
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "attachment".into());
+        out.push(drafts::DraftAttachment {
+            content_type: content_type_for(&name).into(),
+            name,
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        });
+    }
+    out
+}
+
+fn content_type_for(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "doc" => "application/msword",
+        "rtf" => "application/rtf",
+        "md" => "text/markdown",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
     }
 }
 
@@ -158,7 +217,18 @@ pub async fn ack_draft(
         .call(move |c| drafts::ack(c, &id2, saved, b.tb_draft_message_id, err.as_deref()))
         .await?;
     let action = match outcome {
-        drafts::AckOutcome::Saved => "draft_saved",
+        drafts::AckOutcome::Saved => {
+            if let Some(w) = b.error.as_deref().filter(|w| !w.trim().is_empty()) {
+                tracing::warn!(draft = %id, warning = w, "draft saved with a warning");
+                app.notifier
+                    .notify(
+                        crate::telegram::Event::ProcessingFailed,
+                        &format!("⚠️ Draft saved, but: {w}. Please attach the file yourself before sending."),
+                    )
+                    .await;
+            }
+            "draft_saved"
+        }
         drafts::AckOutcome::Retry => {
             app.drafts_ready.notify_waiters();
             "draft_save_retry"

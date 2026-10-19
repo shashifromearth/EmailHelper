@@ -887,7 +887,8 @@ pub async fn handle_human_answer(
         if fact.is_empty() || answer.eq_ignore_ascii_case("skip") {
             return Ok("Okay, skipped.".into());
         }
-        let (pid, f, v) = (person_id.to_string(), fact.to_string(), answer.clone());
+        let v = crate::agents::facts::clean_answer(fact, &answer);
+        let (pid, f) = (person_id.to_string(), fact.to_string());
         app.db
             .call(move |c| jdb::set_person_fact(c, &pid, &f, &v, "telegram"))
             .await?;

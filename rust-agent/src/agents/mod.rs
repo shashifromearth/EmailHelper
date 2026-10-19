@@ -6,4 +6,5 @@ pub mod context;
 pub mod drafter;
 pub mod facts;
 pub mod pipeline;
+pub mod questions;
 pub mod validator;

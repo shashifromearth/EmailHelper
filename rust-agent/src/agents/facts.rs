@@ -126,6 +126,79 @@ pub const FACTS: &[FactSpec] = &[
         ],
     },
     FactSpec {
+        key: "full_name",
+        label: "Full name",
+        private: false,
+        patterns: &["full name:", "candidate name:", "full name?"],
+    },
+    FactSpec {
+        key: "email",
+        label: "Email address",
+        private: false,
+        patterns: &["email address:", "email id:", "email:"],
+    },
+    FactSpec {
+        key: "current_designation",
+        label: "Current designation",
+        private: false,
+        patterns: &["current designation", "current title", "designation:"],
+    },
+    FactSpec {
+        key: "linkedin",
+        label: "LinkedIn profile",
+        private: false,
+        patterns: &["linkedin url", "linkedin profile url", "linkedin link", "share your linkedin", "linkedin profile:"],
+    },
+    FactSpec {
+        key: "preferred_location",
+        label: "Preferred location",
+        private: false,
+        patterns: &["preferred location", "preferred job location", "preferred work location", "location preference"],
+    },
+    FactSpec {
+        key: "work_mode",
+        label: "Preferred work mode",
+        private: false,
+        patterns: &["preferred work mode", "work mode preference", "preferred mode of work"],
+    },
+    FactSpec {
+        key: "employment_type",
+        label: "Employment preference",
+        private: false,
+        patterns: &[
+            "employment preference",
+            "open to full-time",
+            "full-time or contract",
+            "contract or full-time",
+            "permanent or contract",
+        ],
+    },
+    FactSpec {
+        key: "joining_date",
+        label: "Earliest joining date",
+        private: false,
+        patterns: &["joining date", "earliest possible joining", "date of joining", "earliest start date"],
+    },
+    FactSpec {
+        key: "reason_for_change",
+        label: "Reason for looking for a change",
+        private: false,
+        patterns: &[
+            "reason for looking",
+            "reason for change",
+            "reason for job change",
+            "why are you looking",
+            "reason for leaving",
+            "reason for switch",
+        ],
+    },
+    FactSpec {
+        key: "current_offers",
+        label: "Offers in hand",
+        private: false,
+        patterns: &["holding any offers", "offers in hand", "offer in hand", "any other offers", "holding an offer"],
+    },
+    FactSpec {
         key: "resume",
         label: "Updated resume",
         private: false,
@@ -225,6 +298,48 @@ pub struct FactPlan {
     pub answers: Vec<(&'static FactSpec, FactAnswer)>,
     /// Resume the person should attach, when the email asks for one.
     pub attach_resume: Option<String>,
+    /// The resume file travels with the draft (Thunderbird attaches it).
+    pub resume_attached: bool,
+    /// Skills from the person's resume; the draft may claim only these.
+    pub skills: Vec<String>,
+}
+
+/// Tidy a free-text answer from Telegram/dashboard: "Current ctc : 55 Lpa"
+/// or "my notice period is 30 days" becomes "55 LPA" / "30 days".
+pub fn clean_answer(key: &str, raw: &str) -> String {
+    let original = raw.trim();
+    let Some(spec) = FACTS.iter().find(|f| f.key == key) else {
+        return original.to_string();
+    };
+    let mut names: Vec<String> = spec.patterns.iter().map(|p| p.to_string()).collect();
+    names.push(spec.label.to_lowercase());
+    names.push(key.replace('_', " "));
+    names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    let mut t = original.to_string();
+    let lower = t.to_lowercase();
+    if let Some((before, after)) = t.split_once(':') {
+        let b = before.to_lowercase();
+        if names.iter().any(|n| b.contains(n.as_str())) {
+            t = after.trim().to_string();
+        }
+    } else {
+        let l = lower.strip_prefix("my ").unwrap_or(&lower);
+        let same_bytes = lower.len() == t.len();
+        if let Some(n) = names.iter().find(|n| same_bytes && l.starts_with(n.as_str())) {
+            let skip = lower.len() - l.len() + n.len();
+            let rest = t[skip..].trim_start();
+            let rest = rest
+                .strip_prefix("is ")
+                .or_else(|| rest.strip_prefix("would be "))
+                .or_else(|| rest.strip_prefix("- "))
+                .or_else(|| rest.strip_prefix("= "))
+                .unwrap_or(rest);
+            t = rest.trim().to_string();
+        }
+    }
+    let lpa = regex::Regex::new(r"(?i)\blpa\b").expect("valid regex");
+    let t = lpa.replace_all(t.trim(), "LPA").to_string();
+    if t.is_empty() { original.to_string() } else { t }
 }
 
 fn non_empty(s: &str) -> Option<String> {
@@ -240,7 +355,14 @@ fn file_value(p: &Person, key: &str) -> Option<String> {
         "current_ctc" => non_empty(&prof.salary.current_text),
         "notice_period" => non_empty(&prof.salary.notice_period)
             .or_else(|| non_empty(&prof.identity.notice_period)),
-        "last_working_day" => non_empty(&prof.salary.last_working_day),
+        "last_working_day" => non_empty(&prof.salary.last_working_day).or_else(|| {
+            // Someone available immediately isn't serving a notice period.
+            let n = non_empty(&prof.salary.notice_period)
+                .or_else(|| non_empty(&prof.identity.notice_period))?
+                .to_lowercase();
+            (n.contains("immediate") || n.starts_with("0 ") || n == "0" || n.contains("not serving"))
+                .then(|| "Not applicable; not serving a notice period (available immediately)".to_string())
+        }),
         "total_experience" => {
             let y = prof.resume.total_experience_years;
             (y > 0.0).then(|| {
@@ -264,6 +386,45 @@ fn file_value(p: &Person, key: &str) -> Option<String> {
             non_empty(&prof.identity.location).or_else(|| non_empty(&prof.identity.city))
         }
         "phone" => non_empty(&prof.identity.phone),
+        "full_name" => non_empty(&prof.identity.full_name).or_else(|| non_empty(&p.name)),
+        "email" => non_empty(&prof.identity.email),
+        "current_designation" => non_empty(&prof.identity.current_title),
+        "linkedin" => non_empty(&prof.identity.linkedin_url),
+        "preferred_location" => {
+            let mut locs: Vec<String> = Vec::new();
+            for l in &prof.preferences.preferred_locations {
+                let l = l.trim();
+                // "Bangalore" next to "Bengaluru", or a whole country, adds nothing.
+                if l.is_empty() || l.eq_ignore_ascii_case("bangalore") && locs.iter().any(|x| x == "Bengaluru") {
+                    continue;
+                }
+                if !locs.iter().any(|x| x.eq_ignore_ascii_case(l)) {
+                    locs.push(l.to_string());
+                }
+            }
+            let relocate = prof.identity.willing_to_relocate == Some(true);
+            match (locs.is_empty(), relocate) {
+                (true, true) => Some("Open to any location".into()),
+                (true, false) => None,
+                (false, true) => Some(format!("{}; open to relocation", locs.join(", "))),
+                (false, false) => Some(locs.join(", ")),
+            }
+        }
+        "work_mode" => match prof.preferences.remote.trim().to_ascii_lowercase().as_str() {
+            "remote_only" | "remote" => Some("Remote".into()),
+            "hybrid" => Some("Hybrid".into()),
+            "onsite" | "on-site" => Some("On-site".into()),
+            "any" => Some("Open to on-site, hybrid or remote".into()),
+            _ => None,
+        },
+        "joining_date" => {
+            let n = non_empty(&prof.salary.notice_period).or_else(|| non_empty(&prof.identity.notice_period))?;
+            if n.to_lowercase().contains("immediate") {
+                Some("Immediately".into())
+            } else {
+                Some(format!("After my notice period ({n})"))
+            }
+        }
         _ => None,
     }
 }
@@ -288,7 +449,7 @@ pub fn plan(
                 .values
                 .get(f.key)
                 .cloned()
-                .or_else(|| stored.get(f.key).cloned());
+                .or_else(|| stored.get(f.key).map(|v| clean_answer(f.key, v)));
             match (person.private.policy(f.key), value) {
                 (SharePolicy::Never, _) => FactAnswer::Decline,
                 (SharePolicy::SecureChannel, _) => FactAnswer::SecureChannel,
@@ -301,7 +462,7 @@ pub fn plan(
         } else {
             match stored
                 .get(f.key)
-                .cloned()
+                .map(|v| clean_answer(f.key, v))
                 .or_else(|| file_value(person, f.key))
             {
                 Some(v) => FactAnswer::Value(v),
@@ -315,7 +476,7 @@ pub fn plan(
 
 impl FactPlan {
     pub fn is_empty(&self) -> bool {
-        self.answers.is_empty() && self.attach_resume.is_none()
+        self.answers.is_empty() && self.attach_resume.is_none() && self.skills.is_empty()
     }
 
     /// Prompt section listing exactly how to answer each question.
@@ -323,9 +484,10 @@ impl FactPlan {
         if self.is_empty() {
             return String::new();
         }
-        let mut s = String::from(
-            "The email asks for the following. Answer EVERY item directly, using these facts exactly:\n",
-        );
+        let mut s = String::new();
+        if !self.answers.is_empty() || self.attach_resume.is_some() {
+            s.push_str("The email asks for the following. Answer EVERY item directly, using these facts exactly:\n");
+        }
         for (f, a) in &self.answers {
             let line = match a {
                 FactAnswer::Value(v) => format!("- {}: {}", f.label, v),
@@ -348,8 +510,20 @@ impl FactPlan {
             s.push_str(&line);
             s.push('\n');
         }
+        if !self.skills.is_empty() {
+            s.push_str(&format!(
+                "- My skills (from my resume): {}. When the email asks about specific technologies, claim \
+experience ONLY with ones in this list; for the others say I haven't worked with them hands-on, or leave \
+them out. Never invent experience.\n",
+                self.skills.join(", ")
+            ));
+        }
         if self.attach_resume.is_some() {
-            s.push_str("- Updated resume: say the updated resume is attached\n");
+            if self.resume_attached {
+                s.push_str("- Updated resume: it IS attached to this reply; say so in one short sentence\n");
+            } else {
+                s.push_str("- Updated resume: it is NOT attached; say you'll send it shortly\n");
+            }
         }
         s
     }
@@ -357,15 +531,22 @@ impl FactPlan {
     /// Plain facts the draft may contain (for the hallucination check).
     /// Private values are deliberately excluded.
     pub fn grounding(&self) -> String {
-        self.answers
+        let mut lines: Vec<String> = self
+            .answers
             .iter()
             .filter_map(|(f, a)| match a {
                 FactAnswer::Value(v) => Some(format!("{}: {}", f.label, v)),
                 FactAnswer::Token { token, .. } => Some(format!("{}: {}", f.label, token)),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect();
+        if !self.skills.is_empty() {
+            lines.push(format!("Skills (from resume): {}", self.skills.join(", ")));
+        }
+        if let (Some(f), true) = (&self.attach_resume, self.resume_attached) {
+            lines.push(format!("Attached to this reply: {f}"));
+        }
+        lines.join("\n")
     }
 
     pub fn unknown(&self) -> Vec<&'static FactSpec> {
@@ -386,6 +567,67 @@ impl FactPlan {
             }
         }
         out
+    }
+
+    /// Make sure the draft answers every asked item: models sometimes skip
+    /// some. Missing answers are added as a short list before the sign-off.
+    /// Returns the draft and the labels that were added.
+    pub fn ensure_answered(&self, draft: &str) -> (String, Vec<&'static str>) {
+        let lower = draft.to_lowercase();
+        let mentions = |f: &FactSpec| {
+            lower.contains(&f.label.to_lowercase()) || f.patterns.iter().any(|p| lower.contains(p))
+        };
+        let mut missing: Vec<(&'static str, String)> = Vec::new();
+        for (f, a) in &self.answers {
+            let line = match a {
+                FactAnswer::Value(v) => {
+                    // Covered when every significant word of the value is there
+                    // ("available immediately" covers "Immediately Available").
+                    let words: Vec<String> = v
+                        .split(|c: char| !c.is_alphanumeric())
+                        .filter(|w| w.len() >= 4 || w.chars().any(|c| c.is_ascii_digit()))
+                        .map(str::to_lowercase)
+                        .collect();
+                    let covered = if words.is_empty() {
+                        lower.contains(&v.to_lowercase())
+                    } else {
+                        words.iter().all(|w| lower.contains(w.as_str()))
+                    };
+                    (!covered).then(|| v.clone())
+                }
+                FactAnswer::Token { token, .. } => (!draft.contains(token.as_str())).then(|| token.clone()),
+                FactAnswer::SecureChannel => (!mentions(f))
+                    .then(|| "I'll share this over a secure channel rather than by email".to_string()),
+                FactAnswer::Decline => {
+                    (!mentions(f)).then(|| "I'd prefer not to share this over email".to_string())
+                }
+                FactAnswer::Unknown => (!mentions(f)).then(|| "I'll confirm this shortly".to_string()),
+            };
+            if let Some(text) = line {
+                missing.push((f.label, text));
+            }
+        }
+        if missing.is_empty() {
+            return (draft.to_string(), Vec::new());
+        }
+        let block = format!(
+            "For quick reference:\n{}",
+            missing
+                .iter()
+                .map(|(l, t)| format!("- {l}: {t}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let lines: Vec<&str> = draft.trim_end().lines().collect();
+        let out = match lines.iter().rposition(|l| crate::agents::drafter::is_signoff(l)) {
+            Some(i) => {
+                let before = lines[..i].join("\n");
+                let after = lines[i..].join("\n");
+                format!("{}\n\n{block}\n\n{after}", before.trim_end())
+            }
+            None => format!("{}\n\n{block}", draft.trim_end()),
+        };
+        (out, missing.iter().map(|(l, _)| *l).collect())
     }
 
     /// Insert private values into the final draft. Returns the draft and the
@@ -487,7 +729,7 @@ mod tests {
             "PAN defaults to secure channel"
         );
         assert!(section.contains("Current CTC: not known yet"));
-        assert!(section.contains("updated resume is attached"));
+        assert!(section.contains("Updated resume: it is NOT attached"));
         assert_eq!(plan.attach_resume.as_deref(), Some("python.docx"));
         let unknown: Vec<&str> = plan.unknown().iter().map(|f| f.key).collect();
         assert_eq!(unknown, vec!["current_ctc", "last_working_day"]);
@@ -509,5 +751,50 @@ mod tests {
         let (filled, used) = plan.fill_tokens(draft);
         assert_eq!(filled, "Hi, my date of birth is 02-01-1990. Thanks");
         assert_eq!(used, vec!["Date of birth"]);
+    }
+
+    #[test]
+    fn missing_answers_are_added_before_signoff() {
+        let mut plan = FactPlan::default();
+        let spec = |k: &str| FACTS.iter().find(|f| f.key == k).unwrap();
+        plan.answers.push((spec("expected_ctc"), FactAnswer::Value("As per industry standards".into())));
+        plan.answers.push((spec("current_ctc"), FactAnswer::Unknown));
+        plan.answers.push((spec("notice_period"), FactAnswer::Value("Immediately Available".into())));
+        let draft = "Hi,\n\nI'm based in Bengaluru and available immediately.\nCould you share the compensation range?\n\nBest regards,\nShashi";
+        let (out, added) = plan.ensure_answered(draft);
+        assert_eq!(added, vec!["Expected CTC", "Current CTC"]);
+        assert!(out.contains("For quick reference:\n- Expected CTC: As per industry standards\n- Current CTC: I'll confirm this shortly\n\nBest regards,\nShashi"), "{out}");
+        // Already answered → unchanged.
+        let ok = "Expected CTC is in line with industry standards; current CTC I'll confirm shortly. Available immediately.\n\nRegards,\nS";
+        let (same, none) = plan.ensure_answered(ok);
+        assert!(none.is_empty(), "{none:?}");
+        assert_eq!(same, ok);
+    }
+
+    #[test]
+    fn answers_lose_repeated_labels() {
+        assert_eq!(clean_answer("current_ctc", "Current ctc : 55 Lpa"), "55 LPA");
+        assert_eq!(clean_answer("current_ctc", "55 lpa"), "55 LPA");
+        assert_eq!(clean_answer("notice_period", "my notice period is 30 days"), "30 days");
+        assert_eq!(clean_answer("expected_ctc", "Expected CTC - 70 LPA"), "70 LPA");
+        assert_eq!(clean_answer("notice_period", "Immediate"), "Immediate");
+        assert_eq!(clean_answer("current_location", "Bengaluru: Whitefield"), "Bengaluru: Whitefield");
+    }
+
+    #[test]
+    fn immediate_joiner_has_no_last_working_day_and_skills_are_listed() {
+        let mut p = person();
+        let prof = Arc::make_mut(&mut p.profile);
+        prof.salary.notice_period = String::new();
+        prof.identity.notice_period = "Immediately Available".into();
+        prof.salary.last_working_day = String::new();
+        let asked = asked("x", "notice period? what is your last working day?");
+        let mut plan = plan(&p, &BTreeMap::new(), &asked, None);
+        assert!(plan.unknown().is_empty(), "nothing to ask: {:?}", plan.unknown());
+        plan.skills = vec!["Python".into(), "Django".into()];
+        let section = plan.prompt_section();
+        assert!(section.contains("Last working day: Not applicable"), "{section}");
+        assert!(section.contains("My skills (from my resume): Python, Django"), "{section}");
+        assert!(plan.grounding().contains("Skills (from resume): Python, Django"));
     }
 }

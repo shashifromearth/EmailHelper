@@ -199,10 +199,15 @@ async fn facts_are_answered_and_private_values_never_reach_the_model() {
         "{notes}"
     );
     assert!(
-        notes.contains("Attach resume python_cv.md"),
+        notes.contains("Resume python_cv.md attached"),
         "stack-matched resume: {notes}"
     );
+    let att = &d[0]["attachments"][0];
+    assert_eq!(att["name"], "python_cv.md", "resume travels with the draft");
+    assert_eq!(att["content_type"], "text/markdown");
+    assert!(!att["data_base64"].as_str().unwrap_or("").is_empty());
     let p = prompts.lock().unwrap().join("\n");
+    assert!(p.contains("Updated resume: it IS attached"), "model told the resume is attached");
     assert!(p.contains("Notice period: 60 days") && p.contains("Expected CTC: 30 LPA"));
     assert!(p.contains("{{DATE_OF_BIRTH}}"));
     assert!(p.contains("PAN: say you will share it over a secure channel"));
@@ -370,4 +375,51 @@ async fn one_bot_tags_messages_with_the_person() {
             .starts_with("[Himanshu Kumar · himanshu@family.test]"),
         "{first}"
     );
+}
+
+#[tokio::test]
+async fn questionnaire_items_are_all_answered() {
+    let k = household();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let p2 = prompts.clone();
+    // First draft skips the last item; the retry (told what it missed) answers it.
+    let llm = MockProvider::with_handler(move |req| {
+        if req.task != LlmTask::Draft {
+            return None;
+        }
+        p2.lock().unwrap().push(req.prompt.clone());
+        let mut body = String::from(
+            "Hi,\n1. Full Name: Shashi\n2. Contact Number: +91 1\n3. Experience with FastAPI: 5 years\n",
+        );
+        if req.prompt.contains("YOUR PREVIOUS DRAFT MISSED") {
+            body.push_str("4. Reason for Looking for a Change: Happy to discuss on a call\n");
+        }
+        Some(Ok(body))
+    });
+    let a = agent(k.path(), llm, &[]).await;
+    a.post(
+        "/api/v1/emails",
+        &mail(
+            "shashi.jobs@family.test",
+            "<q1@x>",
+            "Recruiter <hr@agency.test>",
+            "Python Developer - candidate details",
+            "Dear Candidate,\nPlease share the details below.\n1. Full Name:\n2. Contact Number:\n\
+             3. Experience with FastAPI:\n4. Reason for Looking for a Change:\n5. Are you holding any offers?\n\
+             Regards,\nRecruitment Team",
+        ),
+    )
+    .await;
+    let d = a.collect_drafts(1, T).await;
+    let body = d[0]["body"].as_str().unwrap();
+    let p = prompts.lock().unwrap().clone();
+    assert_eq!(p.len(), 2, "one retry for the missed items");
+    assert!(p[0].contains("QUESTIONNAIRE") && p[0].contains("5. Are you holding any offers?"));
+    assert!(body.contains("Reason for Looking for a Change: Happy to discuss"), "{body}");
+    assert!(
+        body.contains("- Are you holding any offers?: Will confirm"),
+        "items still missing are listed, never dropped: {body}"
+    );
+    let notes = d[0]["notes"].to_string();
+    assert!(notes.contains("Questionnaire: 5 items"), "{notes}");
 }

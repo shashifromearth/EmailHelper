@@ -139,10 +139,25 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
     let pid = person.id.clone();
     let stored = app.db.call(move |c| jdb::person_facts(c, &pid)).await?;
     let resume = resume_for_email(&person, &e, purpose.as_deref());
-    let plan = facts::plan(&person, &stored, &asked, resume.as_deref());
+    let mut plan = facts::plan(&person, &stored, &asked, resume.as_ref().map(|(f, _)| f.as_str()));
+    let resume_path = resume.as_ref().and_then(|(_, p)| p.clone());
+    let attachments: Vec<String> = match (&plan.attach_resume, &resume_path) {
+        (Some(_), Some(p)) => vec![p.clone()],
+        _ => Vec::new(),
+    };
+    plan.resume_attached = !attachments.is_empty();
+    if purpose.as_deref() == Some(crate::knowledge::people::JOB_SEEKING) || !plan.answers.is_empty() {
+        let mut skills = person.profile.all_skills();
+        skills.dedup();
+        skills.truncate(80);
+        plan.skills = skills;
+    }
 
     // 5. Draft generation, written as the receiving person.
-    let draft = match drafter::generate(&app.llm, &e, &cls, &ctx, &plan.prompt_section()).await {
+    // Recruiter questionnaires get an explicit checklist taken from the full email.
+    let items = crate::agents::questions::extract(&e.body_text);
+    let facts_text = format!("{}{}", plan.prompt_section(), crate::agents::questions::prompt_section(&items));
+    let mut draft = match drafter::generate(&app.llm, &e, &cls, &ctx, &facts_text).await {
         Ok(d) => d,
         Err(err) => {
             app.metrics
@@ -152,11 +167,37 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
             return Err(err);
         }
     };
+    let mut skipped_items = Vec::new();
+    if !items.is_empty() {
+        let missed: Vec<String> = crate::agents::questions::missing(&items, &draft.body)
+            .into_iter()
+            .cloned()
+            .collect();
+        // One more try on a fast cloud model; a local CPU model would take minutes.
+        if !missed.is_empty() && app.llm.provider_name() != "ollama" {
+            let retry = format!(
+                "{facts_text}\nYOUR PREVIOUS DRAFT MISSED THESE ITEMS: {}. Write the whole reply again and \
+answer EVERY questionnaire item.\n",
+                missed.join("; ")
+            );
+            if let Ok(d) = drafter::generate(&app.llm, &e, &cls, &ctx, &retry).await {
+                if crate::agents::questions::missing(&items, &d.body).len() < missed.len() {
+                    draft = d;
+                }
+            }
+        }
+        let still = crate::agents::questions::missing(&items, &draft.body);
+        if !still.is_empty() {
+            draft.body = crate::agents::questions::append_missing(&draft.body, &still);
+            skipped_items = still.iter().map(|s| s.to_string()).collect();
+        }
+    }
 
     // 6. Validation runs on the draft with private placeholders masked, so the
     //    validator (and any LLM reviewer) never sees private values.
-    let grounding = format!("{}\n{}", ctx.grounding, plan.grounding());
-    let masked = plan.mask_tokens(&draft.body);
+    let (draft_body, added) = plan.ensure_answered(&draft.body);
+    let grounding = format!("FACTS (trusted):\n{}\n\n{}", plan.grounding(), ctx.grounding);
+    let masked = plan.mask_tokens(&draft_body);
     let v = validator::validate(
         &app.llm,
         &validator::ValidationInput {
@@ -168,9 +209,18 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
         app.cfg.llm_review_enabled(),
     )
     .await;
-    let (body, private_used) = plan.fill_tokens(&draft.body);
+    let (body, private_used) = plan.fill_tokens(&draft_body);
     let mut verdict = v.verdict;
     let mut notes = v.notes.clone();
+    if !added.is_empty() {
+        notes.push(format!("Added answers the model left out: {}", added.join(", ")));
+    }
+    if !items.is_empty() {
+        notes.push(format!("Questionnaire: {} items", items.len()));
+    }
+    if !skipped_items.is_empty() {
+        notes.push(format!("Marked 'Will confirm': {}", skipped_items.join("; ")));
+    }
     if !private_used.is_empty() {
         verdict = validator::Verdict::ReviewRequired;
         notes.push(format!(
@@ -179,7 +229,11 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
         ));
     }
     if let Some(file) = &plan.attach_resume {
-        notes.push(format!("Attach resume {file} before sending"));
+        notes.push(if plan.resume_attached {
+            format!("Resume {file} attached")
+        } else {
+            format!("Attach resume {file} before sending")
+        });
     }
     if verdict == validator::Verdict::ReviewRequired {
         app.metrics.validation_failures_total.inc();
@@ -236,6 +290,7 @@ pub async fn process_email(app: &Arc<App>, email_id: &str) -> AppResult<()> {
         llm_model: Some(draft.model.clone()),
         from_address: route.mailbox.clone(),
         person_id: Some(person.id.clone()),
+        attachments,
     };
     let draft_id = app.db.call(move |c| drafts::insert(c, &new)).await?;
     app.drafts_ready.notify_waiters();
@@ -359,7 +414,12 @@ pub fn choose_purpose(
 
 /// The resume to attach when an email asks for one, chosen by the tech stack
 /// the email mentions.
-fn resume_for_email(person: &Person, e: &emails::EmailRecord, purpose: Option<&str>) -> Option<String> {
+/// Resume for a reply: (file name, path to attach when the file is known).
+fn resume_for_email(
+    person: &Person,
+    e: &emails::EmailRecord,
+    purpose: Option<&str>,
+) -> Option<(String, Option<String>)> {
     let mut d = crate::db::jobs::JobDetails::default();
     crate::jobs::extract::enrich_from_text(
         &mut d,
@@ -368,10 +428,10 @@ fn resume_for_email(person: &Person, e: &emails::EmailRecord, purpose: Option<&s
     );
     person
         .select_resume(&d.skills, purpose)
-        .map(|(r, _)| r.file_name.clone())
+        .map(|(r, _)| (r.file_name.clone(), Some(r.path.to_string_lossy().to_string())))
         .or_else(|| {
             let f = person.profile.resume.resume_file.trim();
-            (!f.is_empty()).then(|| f.to_string())
+            (!f.is_empty()).then(|| (f.to_string(), None))
         })
 }
 

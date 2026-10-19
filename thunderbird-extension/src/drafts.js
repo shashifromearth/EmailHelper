@@ -185,9 +185,41 @@ async function closeComposeTab(messenger, tab) {
   }
 }
 
+/** Decode standard base64 into bytes. */
+export function base64ToBytes(b64) {
+  const bin = atob(String(b64 || "").replace(/\s+/g, ""));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 /**
- * Open a compose window for `draft`, save it as a draft and close it.
- * Returns { tbDraftMessageId } (null when Thunderbird does not report it).
+ * Attach the files the backend sent with the draft (e.g. the chosen resume).
+ * A failed attachment does not fail the draft; it is reported as a warning.
+ */
+export async function addAttachments(messenger, tabId, attachments) {
+  const warnings = [];
+  const list = Array.isArray(attachments) ? attachments : [];
+  if (list.length && typeof messenger.compose.addAttachment !== "function") {
+    return list.map((a) => `could not attach ${a?.name || "file"} (this Thunderbird has no compose.addAttachment)`);
+  }
+  for (const a of list) {
+    const name = a && typeof a.name === "string" && a.name.trim() ? a.name.trim() : "attachment";
+    try {
+      const bytes = base64ToBytes(a.data_base64);
+      const file = new File([bytes], name, { type: a.content_type || "application/octet-stream" });
+      await messenger.compose.addAttachment(tabId, { file, name });
+    } catch (err) {
+      warnings.push(`could not attach ${name}: ${errMsg(err)}`);
+    }
+  }
+  return warnings;
+}
+
+/**
+ * Open a compose window for `draft`, attach its files, save it as a draft and
+ * close it. Returns { tbDraftMessageId, warnings } (tbDraftMessageId is null
+ * when Thunderbird does not report it).
  */
 export async function saveDraft(draft, { messenger, sleep = defaultSleep, saveRetryDelayMs = 750, log = () => {} } = {}) {
   if (draft.kind !== "reply" && draft.kind !== "new") throw new Error(`unsupported draft kind: ${draft.kind}`);
@@ -254,6 +286,9 @@ export async function saveDraft(draft, { messenger, sleep = defaultSleep, saveRe
       }
     }
 
+    const warnings = await addAttachments(messenger, tab.id, draft.attachments);
+    for (const w of warnings) log("warn", `draft ${draft.draft_id}: ${w}`);
+
     let saved;
     try {
       saved = await messenger.compose.saveMessage(tab.id, { mode: "draft" });
@@ -267,7 +302,7 @@ export async function saveDraft(draft, { messenger, sleep = defaultSleep, saveRe
       }
     }
     const id = saved && Array.isArray(saved.messages) && saved.messages[0] ? saved.messages[0].id : null;
-    return { tbDraftMessageId: Number.isInteger(id) ? id : null };
+    return { tbDraftMessageId: Number.isInteger(id) ? id : null, warnings };
   } finally {
     await closeComposeTab(messenger, tab);
   }
@@ -378,7 +413,8 @@ export class DraftProcessor {
 
     this.saved.set(draftId, { tbDraftMessageId: result.tbDraftMessageId, at: this.now() });
     await this._persist();
-    await this._ack(draftId, { status: "saved", tb_draft_message_id: result.tbDraftMessageId, error: null });
+    const warning = result.warnings && result.warnings.length ? result.warnings.join("; ").slice(0, 1000) : null;
+    await this._ack(draftId, { status: "saved", tb_draft_message_id: result.tbDraftMessageId, error: warning });
     this.onEvent({ type: "draft_saved", draftId, subject: draft.subject || "", review: draft.validation === REVIEW_REQUIRED });
     try {
       await this.notify(draft);
