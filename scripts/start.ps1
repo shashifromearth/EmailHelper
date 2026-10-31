@@ -1,7 +1,7 @@
 # One command to (re)start EmailHelper:
 #   1. rebuilds the agent when its source changed (or with -Rebuild),
 #   2. makes sure Ollama (local fallback model) is running, if installed,
-#   3. stops any running copy and starts the browser worker + agent,
+#   3. stops any running copy and starts the browser worker, job-links + agent,
 #   4. prints the health check.
 #
 #   run.cmd                   # from the repo root (or scripts\start.ps1)
@@ -27,13 +27,15 @@ foreach ($dir in @(
 }
 
 $bin = Join-Path $root 'data\bin\emailhelper.exe'
+$linksBin = Join-Path $root 'data\bin\job-links.exe'
 New-Item -ItemType Directory -Force (Split-Path $bin) | Out-Null
 
 # 1. Build when needed.
-$needBuild = $Rebuild -or -not (Test-Path $bin)
+$needBuild = $Rebuild -or -not (Test-Path $bin) -or -not (Test-Path $linksBin)
 if (-not $needBuild -and -not $NoBuild) {
-    $built = (Get-Item $bin).LastWriteTime
-    $newer = Get-ChildItem -Recurse -File (Join-Path $root 'rust-agent\src'), (Join-Path $root 'rust-agent\Cargo.toml') |
+    $built = @((Get-Item $bin).LastWriteTime, (Get-Item $linksBin).LastWriteTime) | Sort-Object | Select-Object -First 1
+    $newer = Get-ChildItem -Recurse -File (Join-Path $root 'rust-agent\src'), (Join-Path $root 'rust-agent\Cargo.toml'),
+        (Join-Path $root 'job-links\src'), (Join-Path $root 'job-links\Cargo.toml') |
         Where-Object { $_.LastWriteTime -gt $built } | Select-Object -First 1
     $needBuild = $null -ne $newer
 }
@@ -42,8 +44,8 @@ if ($needBuild -and -not $NoBuild) {
         Write-Host 'cargo not found: install Rust (see documents\INSTALL.md) or use -NoBuild.' -ForegroundColor Red
         exit 1
     }
-    Write-Host 'building the agent (release)... this can take a few minutes'
-    cargo build --release -p emailhelper
+    Write-Host 'building the agent and job-links (release)... this can take a few minutes'
+    cargo build --release -p emailhelper -p job-links
     if ($LASTEXITCODE -ne 0) { Write-Host 'build failed; nothing was restarted.' -ForegroundColor Red; exit 1 }
 }
 
@@ -61,12 +63,12 @@ if (Get-Command ollama -ErrorAction SilentlyContinue) {
 & (Join-Path $PSScriptRoot 'stop-local.ps1') | Out-Null
 if ($needBuild -and -not $NoBuild) {
     Copy-Item (Join-Path $root 'target\release\emailhelper.exe') $bin -Force
+    Copy-Item (Join-Path $root 'target\release\job-links.exe') $linksBin -Force
 }
-if ($WithMockSites) {
-    & (Join-Path $PSScriptRoot 'run-local.ps1') -Binary $bin -WithMockSites
-} else {
-    & (Join-Path $PSScriptRoot 'run-local.ps1') -Binary $bin
-}
+$runArgs = @{ Binary = $bin }
+if (Test-Path $linksBin) { $runArgs.LinksBinary = $linksBin }
+if ($WithMockSites) { $runArgs.WithMockSites = $true }
+& (Join-Path $PSScriptRoot 'run-local.ps1') @runArgs
 
 # 4. Health.
 Start-Sleep -Seconds 3

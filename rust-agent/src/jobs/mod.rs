@@ -11,6 +11,7 @@ pub mod detect;
 pub mod digest;
 pub mod employer;
 pub mod extract;
+pub mod linkqueue;
 pub mod matcher;
 
 use std::sync::Arc;
@@ -134,7 +135,6 @@ pub async fn process_job_email(app: &Arc<App>, email_id: &str) -> AppResult<()> 
         );
         return Ok(());
     };
-    let tag = crate::telegram::format::person_tag(&person.name, e.account_email.as_deref());
     // LinkedIn, Naukri & co. only allow applying inside a logged-in account and
     // forbid bots: never open their pages; work from the email instead. Links
     // straight to an employer's own application page are still followed.
@@ -144,6 +144,10 @@ pub async fn process_job_email(app: &Arc<App>, email_id: &str) -> AppResult<()> 
         .filter(|l| alerts::is_login_platform(&l.ats))
         .cloned()
         .collect();
+    if app.cfg.jobs.links_enabled {
+        return queue_links(app, &e, &signal, &platform_links, &person).await;
+    }
+    let tag = crate::telegram::format::person_tag(&person.name, e.account_email.as_deref());
     if alerts::is_login_platform(&signal.source) || !platform_links.is_empty() {
         process_platform_alert(app, &e, &signal.source, &platform_links, &person, &tag).await?;
     }
@@ -234,6 +238,44 @@ pub async fn process_job_email(app: &Arc<App>, email_id: &str) -> AppResult<()> 
     Ok(())
 }
 
+/// The platform an alert email lists jobs for.
+fn alert_platform<'a>(source: &'a str, platform_links: &'a [detect::JobLink]) -> &'a str {
+    platform_links
+        .first()
+        .filter(|_| !alerts::is_login_platform(source))
+        .map(|l| l.ats.as_str())
+        .unwrap_or(source)
+}
+
+/// `JOB_LINKS_ENABLED`: hand every job link in the email to the job-links
+/// service (the Chrome extension applies from there); nothing is browsed.
+async fn queue_links(
+    app: &Arc<App>,
+    e: &EmailRecord,
+    signal: &detect::JobSignal,
+    platform_links: &[detect::JobLink],
+    person: &crate::knowledge::Person,
+) -> AppResult<()> {
+    let listed = alerts::parse(alert_platform(&signal.source, platform_links), &e.body_text);
+    let person_id = person_id_of(person);
+    let links = linkqueue::links_for_email(e, signal, &listed, person_id.as_deref());
+    if links.is_empty() {
+        tracing::info!(email_id = %e.id, "no job links to queue");
+        return Ok(());
+    }
+    let summary = linkqueue::LinkQueueClient::from_app(app).push(&links).await?;
+    app.audit(
+        "job_agent",
+        "job_links_queued",
+        "email",
+        &e.id,
+        json!({ "links": links.len(), "created": summary.created, "updated": summary.updated, "failed": summary.failed }),
+    )
+    .await;
+    tracing::info!(email_id = %e.id, links = links.len(), created = summary.created, updated = summary.updated, failed = summary.failed, "job links queued");
+    Ok(())
+}
+
 /// "5 - 10 years" / "9-13 Yrs" → 5.
 fn min_years(exp: &str) -> Option<f64> {
     exp.split(|c: char| !c.is_ascii_digit() && c != '.')
@@ -284,11 +326,7 @@ async fn process_platform_alert(
     person: &crate::knowledge::Person,
     tag: &str,
 ) -> AppResult<()> {
-    let platform = platform_links
-        .first()
-        .filter(|_| !alerts::is_login_platform(source))
-        .map(|l| l.ats.as_str())
-        .unwrap_or(source);
+    let platform = alert_platform(source, platform_links);
     let mut listed = alerts::parse(platform, &e.body_text);
     if listed.is_empty() {
         // No job list in the body (recruiter mail, unknown layout): the subject

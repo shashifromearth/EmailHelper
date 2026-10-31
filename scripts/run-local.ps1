@@ -1,5 +1,6 @@
 # Start the EmailHelper stack locally from .env:
-#   browser worker (if JOB_AGENT_ENABLED or RECRUITER_LINKEDIN_ENABLED), optional
+#   browser worker (if JOB_AGENT_ENABLED or RECRUITER_LINKEDIN_ENABLED), the
+#   job-links service (if JOB_LINKS_ENABLED or JOB_LINKS_TOKEN is set), optional
 #   mock ATS sites, and the Rust agent. Logs go to data\logs, PIDs to data\run.
 #
 #   scripts\run-local.ps1                 # agent + worker
@@ -8,7 +9,8 @@
 param(
     [switch]$WithMockSites,
     [int]$MockPort = 18080,
-    [string]$Binary = ''
+    [string]$Binary = '',
+    [string]$LinksBinary = ''
 )
 $ErrorActionPreference = 'Continue'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
@@ -36,8 +38,12 @@ function Start-Component([string]$Name, [string]$File, [string[]]$ArgList, [stri
         $old = Get-Process -Id (Get-Content $pidFile) -ErrorAction SilentlyContinue
         if ($null -ne $old) { Write-Host "$Name already running (pid $($old.Id))"; return }
     }
-    $p = Start-Process $File -ArgumentList $ArgList -WorkingDirectory $Dir -PassThru -WindowStyle Hidden `
-        -RedirectStandardOutput (Join-Path $logs "$Name.log") -RedirectStandardError (Join-Path $logs "$Name.err.log")
+    $opts = @{
+        FilePath = $File; WorkingDirectory = $Dir; PassThru = $true; WindowStyle = 'Hidden'
+        RedirectStandardOutput = (Join-Path $logs "$Name.log"); RedirectStandardError = (Join-Path $logs "$Name.err.log")
+    }
+    if ($ArgList.Count -gt 0) { $opts.ArgumentList = $ArgList }
+    $p = Start-Process @opts
     Set-Content $pidFile $p.Id
     Write-Host "started $Name (pid $($p.Id)) - logs: data\logs\$Name.log"
 }
@@ -64,6 +70,18 @@ if ($env:JOB_AGENT_ENABLED -eq 'true' -or $env:RECRUITER_LINKEDIN_ENABLED -eq 't
     $port = if ($env:BROWSER_WORKER_PORT) { $env:BROWSER_WORKER_PORT } else { '7801' }
     if (Wait-Http "http://127.0.0.1:$port/health" 20) { Write-Host "browser worker: http://127.0.0.1:$port/health" }
     else { Write-Warning "browser worker not healthy yet; see data\logs\browser-worker.err.log" }
+}
+
+if ($env:JOB_LINKS_ENABLED -eq 'true' -or $env:JOB_LINKS_TOKEN) {
+    if (-not $LinksBinary) {
+        $LinksBinary = Join-Path $root 'target\release\job-links.exe'
+        if (-not (Test-Path $LinksBinary)) { $LinksBinary = Join-Path $root 'target\debug\job-links.exe' }
+    }
+    if (-not (Test-Path $LinksBinary)) { throw "job-links binary not found; run 'cargo build --release -p job-links'" }
+    Start-Component 'job-links' $LinksBinary @() $root
+    $linksPort = if ($env:JOB_LINKS_PORT) { $env:JOB_LINKS_PORT } else { '7810' }
+    if (Wait-Http "http://127.0.0.1:$linksPort/health" 15) { Write-Host "job links: http://127.0.0.1:$linksPort/health" }
+    else { Write-Warning "job-links not healthy yet (is JOB_LINKS_TOKEN 16+ chars?); see data\logs\job-links.err.log" }
 }
 
 if (-not $Binary) {

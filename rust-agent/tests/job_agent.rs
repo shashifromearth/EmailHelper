@@ -735,3 +735,88 @@ async fn old_job_alerts_are_counted_but_never_browsed() {
         .await
         .contains("jobs_detected_total{source=\"linkedin\"} 1"));
 }
+
+#[tokio::test]
+async fn job_links_mode_queues_every_link_instead_of_applying() {
+    let worker = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/health"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"ok"})))
+        .mount(&worker)
+        .await;
+    let links = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/links"))
+        .and(header("x-joblinks-token", "links-secret-0123456789"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "created": 3, "updated": 0, "failed": 0, "results": []
+        })))
+        .expect(1)
+        .mount(&links)
+        .await;
+    let agent = builder()
+        .env("JOB_AGENT_ENABLED", "true")
+        .env("JOB_SUBMIT_MODE", "auto")
+        .env("BROWSER_WORKER_URL", &worker.uri())
+        .env("JOB_MAX_ATTEMPTS", "1")
+        .env("JOB_LINKS_ENABLED", "true")
+        .env("JOB_LINKS_URL", &links.uri())
+        .env("JOB_LINKS_TOKEN", "links-secret-0123456789")
+        .start()
+        .await;
+
+    let body = "Your job alert for Technical Lead\n\
+Lead AI Engineer\nNetrolynx AI\nUnited States\n\
+View job: https://www.linkedin.com/comm/jobs/view/4480916162/?trackingId=abc\n\
+---------------------------------------------------------\n\
+AI Engineering Lead\nBeni Health\nRemote\n\
+View job: https://www.linkedin.com/comm/jobs/view/4479947091/?trackingId=def\n";
+    let lever = "https://jobs.lever.co/acme/1b2c-3d";
+    let html = format!(
+        r#"<p><a href="https://eur01.safelinks.protection.outlook.com/?url={}&amp;data=x">Staff Rust Engineer</a></p>"#,
+        url::form_urlencoded::byte_serialize(lever.as_bytes()).collect::<String>()
+    );
+    let mut e = email(
+        "acct1",
+        "<alert-links@linkedin.com>",
+        "LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>",
+        "Lead AI Engineer at Netrolynx AI and 1 more job",
+        body,
+    );
+    e["body_html"] = json!(html);
+    agent.post("/api/v1/emails", &e).await;
+
+    let sent: Value = wait_for("links posted", T, || async {
+        let reqs = links.received_requests().await?;
+        reqs.first().and_then(|r| serde_json::from_slice(&r.body).ok())
+    })
+    .await;
+    let queued = sent["links"].as_array().unwrap();
+    assert_eq!(queued.len(), 3, "{sent}");
+    let by_url = |u: &str| queued.iter().find(|l| l["url"] == u).unwrap_or_else(|| panic!("{u} not in {sent}"));
+    let first = by_url("https://www.linkedin.com/jobs/view/4480916162/");
+    assert_eq!(first["title"], "Lead AI Engineer");
+    assert_eq!(first["company"], "Netrolynx AI");
+    assert_eq!(first["platform"], "linkedin");
+    assert_eq!(first["source"], "email");
+    assert_eq!(first["mailbox"], "acct1@example.com");
+    assert!(first["email_id"].is_string());
+    assert_eq!(by_url("https://www.linkedin.com/jobs/view/4479947091/")["company"], "Beni Health");
+    let ats = by_url(lever);
+    assert_eq!(ats["platform"], "lever");
+    assert_eq!(ats["title"], "Staff Rust Engineer");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let reqs = worker.received_requests().await.unwrap();
+    assert!(
+        reqs.iter().all(|r| r.url.path() == "/health"),
+        "the browser worker is not used in job-links mode"
+    );
+    let apps = agent
+        .app
+        .db
+        .call(|c| jdb::list_applications(c, None, 10))
+        .await
+        .unwrap();
+    assert!(apps.is_empty());
+}
