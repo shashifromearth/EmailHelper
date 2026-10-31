@@ -68,6 +68,7 @@ const LANGUAGES: &[&str] = &[
 const SPONSORS: &[&str] = &[
     "visa sponsorship available", "visa sponsorship is available", "will sponsor", "we sponsor", "sponsorship provided",
     "provide visa sponsorship", "offer visa sponsorship", "sponsor work visas", "sponsorship and relocation",
+    "sponsor your visa", "visa and relocation support", "relocation assistance", "relocation support", "relocation package",
 ];
 
 /// A language the posting requires that isn't one of `known`.

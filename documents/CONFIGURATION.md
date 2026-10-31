@@ -103,10 +103,48 @@ Browser worker settings (read by `browser-worker/`): `BROWSER_WORKER_HOST`,
 | `RESEARCH_SUMMARY_TOP_N` | `10` | Number of jobs in the Telegram summary. |
 | `RESEARCH_REMOTE_BOARDS` | `remotive;remoteok;himalayas;jobicy;weworkremotely` | Remote-job boards read once a day through their public APIs/feeds (`none` turns them off). `RESEARCH_<BOARD>_URL` overrides an endpoint. |
 | `RESEARCH_MAX_AGE_HOURS` | `25` | Only postings published within this many hours are kept; postings without a date are dropped. `0` keeps everything. |
-| `RESEARCH_APPLICANT_COUNTRY` | first authorized country in the research person's profile | Jobs must be in this country or open to applicants from it ("Worldwide", "APAC", "India"). Jobs limited to other regions, or whose description says "US only", "must be located in the US", "EU only" and similar, are dropped. |
-| `RESEARCH_REQUIRE_REMOTE` | `true` | A kept job must be remote (or a distributed team). |
-| `RESEARCH_WORK_TYPES` | `contract;freelance;consultant` | A kept job must be one of these role types, judged from the board's employment type, the title/tags and clear phrases such as "contract role" or "independent consultant" (`none` = full-time roles too). |
-| `RESEARCH_TECH_STACK` | `python;c#;.net;java;genai;agentic ai` | A kept job must mention one of these (synonyms included: Django/FastAPI, ASP.NET, Spring, LLM/RAG/LangChain, LangGraph/multi-agent). `none` falls back to `RESEARCH_SEARCH_TERMS` matching titles. |
+| `RESEARCH_APPLICANT_COUNTRY` | first authorized country in the research person's profile | Remote jobs must be open to applicants in this country ("Worldwide", "APAC", "India"); jobs limited to other regions, or whose description says "US only", "must be located in the US", "EU only", "US citizens" and similar, are dropped. On-site / hybrid jobs are kept when they are in this country, or abroad when the description offers visa sponsorship, relocation help or welcomes international applicants (and doesn't say "no sponsorship"). |
+| `RESEARCH_REQUIRE_REMOTE` | `false` | `true`: a kept job must be remote (or a distributed team). `false`: on-site / hybrid jobs are kept too, under the rule above. |
+| `RESEARCH_WORK_TYPES` | `none` | Hard filter: a kept job must be one of these role types (e.g. `contract;freelance;consultant`), judged from the board's employment type, the title/tags and clear phrases such as "contract role" or "independent consultant". `none` = any role type. |
+| `RESEARCH_PREFERRED_WORK_TYPES` | `contract;freelance;consultant` | Role types ranked first. |
+| `RESEARCH_PRIORITY_BOOST` | `10` | Ranking points for a remote job, and again for a preferred role type. Orders the Telegram summary and the applications started; the stored match score is unchanged. `0` turns ranking boosts off. |
+| `RESEARCH_TECH_STACK` | `python;c#;.net;java;rust;go;genai;agentic ai` | A kept job must mention one of these (synonyms included: Django/FastAPI, ASP.NET, Spring, Golang, LLM/RAG/LangChain, LangGraph/multi-agent). Titles must be engineering roles: developer/engineer, senior/lead/staff/principal, architect, engineering manager/director. `none` falls back to `RESEARCH_SEARCH_TERMS` matching titles. |
+
+### Job APIs and search APIs
+
+Read once a day after the boards above. Every request carries an identifying
+User-Agent and waits between requests; queries rotate daily so a long list
+is covered over a few days within the budget. A source whose key is missing
+is skipped with one log line. Jobs found on several sources are kept once
+(same canonical URL, or same company and title). Tests and `research_check`
+use `RESEARCH_SOURCES=none` or mock servers; no test calls a real API.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RESEARCH_SOURCES` | `adzuna;jooble;careerjet;arbeitnow;themuse;google_cse;brave` | Sources to read (`none` = off). |
+| `RESEARCH_API_QUERIES` | 13 role + stack keywords (`python developer`, `.net developer`, `golang developer`, `genai architect`, `engineering manager`…) | Keywords for Adzuna, Jooble and Careerjet. |
+| `RESEARCH_API_MAX_REQUESTS` | `250` | Requests per run across all API sources. |
+| `RESEARCH_API_MAX_REQUESTS_PER_SOURCE` | `40` | Requests per run for one source. |
+| `RESEARCH_API_DELAY_MS` | each API's own (Adzuna 2500, Brave 1100, The Muse/Google 500, others 1000) | Pause between two requests to one API. |
+| `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` | — | [developer.adzuna.com](https://developer.adzuna.com) (free: 25 requests/min, 250/day). |
+| `ADZUNA_COUNTRIES` | `in;us;gb;de;sg;nl` | Adzuna country codes (Adzuna covers at, au, be, br, ca, ch, de, es, fr, gb, in, it, mx, nl, nz, pl, sg, us, za; no UAE). |
+| `ADZUNA_API_BASE` | `https://api.adzuna.com/v1/api/jobs` | Endpoint override (tests). |
+| `JOOBLE_API_KEY` | — | [jooble.org/api/about](https://jooble.org/api/about). |
+| `JOOBLE_LOCATIONS` | `Remote;India` | One query per keyword and location. |
+| `JOOBLE_API_BASE` | `https://jooble.org/api` | Endpoint override. |
+| `CAREERJET_AFFID` | — | Affiliate id from [careerjet.com/partners](https://www.careerjet.com/partners/api). |
+| `CAREERJET_LOCALES` | `en_IN;en_AE;en_SG;en_GB;en_US` | Careerjet sites to search (the locale's country is added to each job's location). |
+| `CAREERJET_USER_IP` | `127.0.0.1` | Sent as `user_ip` (Careerjet requires it); set your public IP. |
+| `CAREERJET_API_BASE` | `http://public.api.careerjet.net/search` | Endpoint override. |
+| `ARBEITNOW_PAGES` / `ARBEITNOW_API_BASE` | `3` / `https://www.arbeitnow.com/api/job-board-api` | No key. Mostly Europe; on-site jobs pass only with visa sponsorship / relocation. |
+| `THEMUSE_PAGES` / `THEMUSE_API_KEY` / `THEMUSE_API_BASE` | `5` / — / `https://www.themuse.com/api/public/jobs` | No key needed (a key raises the hourly limit). Reads senior and management Software Engineering / Data Science jobs marked "Flexible / Remote". |
+| `GOOGLE_CSE_KEY` / `GOOGLE_CSE_CX` | — | Google Programmable Search JSON API key and search engine id (free: 100 queries/day). |
+| `GOOGLE_CSE_API_BASE` | `https://www.googleapis.com/customsearch/v1` | Endpoint override. |
+| `BRAVE_SEARCH_KEY` | — | Brave Search API subscription token ([api-dashboard.search.brave.com](https://api-dashboard.search.brave.com)). |
+| `BRAVE_SEARCH_API_BASE` | `https://api.search.brave.com/res/v1/web/search` | Endpoint override. |
+| `RESEARCH_SEARCH_ROLES` | `developer;senior engineer;architect;lead;engineering manager` | Search-API queries are `site:<site> "<role>" <stack>`; Google and Brave each take a different daily window of them. |
+| `RESEARCH_SEARCH_STACKS` | `python;.net;java;golang;rust;generative ai;agentic ai` | |
+| `RESEARCH_SEARCH_SITES` | `linkedin;glassdoor;naukri;wellfound;indeed;instahyre;hirist;foundit;iimjobs;upwork;freelancer;arc;dice;remoteco` | Only results that are job postings on these sites are kept. The sites themselves are never fetched; their postings are listed in the Telegram summary with the link, to apply with the browser extension (the agent never applies to them). |
 | `RESEARCH_AUTO_APPLY` | `false` | Start applications for discovered jobs that aren't skipped (needs `JOB_AGENT_ENABLED`). Jobs from your own mail are handled by the job agent regardless. |
 | `RECRUITER_DISCOVERY_ENABLED` | `false` | Finds recruiters for recruiting or job emails. |
 | `RECRUITER_LINKEDIN_ENABLED` | `false` | LinkedIn people search through your logged-in worker profile. |
