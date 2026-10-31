@@ -45,6 +45,7 @@ async fn require_token(
     // CORS is not enabled so browsers can't read responses anyway).
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
         let allowed = origin.starts_with("moz-extension://")
+            || origin.starts_with("chrome-extension://")
             || origin.starts_with("http://127.0.0.1")
             || origin.starts_with("http://localhost");
         if !allowed {
@@ -72,6 +73,13 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/status", get(handlers::status))
         .route("/dashboard", get(handlers::dashboard_data))
         .route("/jobs", get(handlers::list_jobs).post(handlers::submit_job))
+        .route("/apply/answers", post(handlers::apply_answers))
+        .route("/apply/remember", post(handlers::apply_remember))
+        .route("/apply/escalations", post(handlers::apply_escalate))
+        .route("/apply/escalations/{id}", get(handlers::apply_escalation))
+        .route("/apply/escalations/{id}/resolve", post(handlers::apply_resolve))
+        .route("/apply/events", post(handlers::apply_events))
+        .route("/apply/events/summary", get(handlers::apply_events_summary))
         .route("/applications", get(handlers::list_applications))
         .route(
             "/applications/{id}/answer",
@@ -86,6 +94,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/research/run", post(handlers::run_research))
         .route("/knowledge/reindex", post(handlers::knowledge_reindex))
         .route("/knowledge/status", get(handlers::knowledge_status))
+        .route("/job-links/status", get(handlers::job_links_status))
         .route("/audit", get(handlers::audit_log))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_token));
 

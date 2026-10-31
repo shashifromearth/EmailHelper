@@ -329,6 +329,34 @@ async fn hallucinated_facts_force_review() {
 }
 
 #[tokio::test]
+async fn details_copied_from_the_email_force_review() {
+    // The incoming email is not a source: a link or phone number the draft
+    // copies from it (a phishing pattern) goes to review.
+    let llm = MockProvider::with_handler(|req| match req.task {
+        LlmTask::Draft => Some(Ok("Hi Jane, thanks for the note. I will book my slot at https://book.slots-acme.example/confirm \
+today and call +1 415 555 0199 if anything is unclear.\n\nBest regards,\nAsha Rao".into())),
+        _ => None,
+    });
+    let a = builder().llm(llm).start().await;
+    a.post(
+        "/api/v1/emails",
+        &email(
+            "acct1",
+            "<ph@x>",
+            "jane@acme.com",
+            "Workshop slot",
+            "Please confirm your workshop slot at https://book.slots-acme.example/confirm or call +1 415 555 0199 today.",
+        ),
+    )
+    .await;
+    let d = a.collect_drafts(1, T).await;
+    assert_eq!(d[0]["validation"], "REVIEW_REQUIRED");
+    let notes = d[0]["notes"].to_string();
+    assert!(notes.contains("repeats contact details from the incoming email"), "{notes}");
+    assert!(notes.contains("book.slots-acme.example/confirm") && notes.contains("phone 14155550199"), "{notes}");
+}
+
+#[tokio::test]
 async fn llm_outage_falls_back_to_rules_then_fails_cleanly() {
     // Classification fails (rules take over); drafting fails -> job dead.
     let llm = MockProvider::with_handler(|_| {

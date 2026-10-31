@@ -2,6 +2,7 @@
 //! `spawn_blocking`; SQLite serialises writers anyway and every statement here
 //! is short, so this keeps memory low and behaviour predictable.
 
+pub mod apply;
 pub mod audit;
 pub mod drafts;
 pub mod emails;
@@ -28,6 +29,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("migrations/003_attachments.sql")),
     (4, include_str!("migrations/004_employer_boards.sql")),
     (5, include_str!("migrations/005_eval_live.sql")),
+    (6, include_str!("migrations/006_apply_feedback.sql")),
 ];
 
 impl Db {
@@ -179,6 +181,8 @@ mod tests {
             "interviews",
             "research_findings",
             "person_facts",
+            "apply_escalations",
+            "apply_events",
         ] {
             let t2 = t.to_string();
             let exists: bool = db

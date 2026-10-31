@@ -31,6 +31,7 @@ pub struct Metrics {
     pub telegram_requests_total: IntCounterVec,
     pub playwright_failures_total: IntCounterVec,
     pub research_runs_total: IntCounterVec,
+    pub apply_events_total: IntCounterVec,
     pub build_info: IntGaugeVec,
 }
 
@@ -208,6 +209,12 @@ impl Metrics {
                 "Research discovery runs",
                 &["status"],
             ),
+            apply_events_total: counter_vec(
+                &r,
+                "apply_events_total",
+                "Chrome extension applier events (failures, applications, escalations)",
+                &["kind"],
+            ),
             build_info,
             registry: r,
         }
@@ -262,6 +269,7 @@ mod tests {
             .with_label_values(&["fill"])
             .inc();
         m.research_runs_total.with_label_values(&["ok"]).inc();
+        m.apply_events_total.with_label_values(&["fill_failed"]).inc();
         m.llm_requests_total
             .with_label_values(&["ollama", "ok"])
             .inc();
@@ -293,6 +301,7 @@ mod tests {
             "telegram_requests_total",
             "playwright_failures_total",
             "research_runs_total",
+            "apply_events_total",
             "build_info",
         ] {
             assert!(out.contains(name), "missing {name}");

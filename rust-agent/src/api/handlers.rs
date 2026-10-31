@@ -569,6 +569,73 @@ pub async fn list_recruiters(
     Ok(Json(json!({ "recruiters": r })))
 }
 
+/// Chrome extension: answers for the fields of an application form.
+pub async fn apply_answers(
+    State(app): State<Arc<App>>,
+    Json(req): Json<crate::jobs::assist::AnswersRequest>,
+) -> AppResult<Json<crate::jobs::assist::AnswersResponse>> {
+    Ok(Json(crate::jobs::assist::answer(&app, req).await?))
+}
+
+/// Chrome extension: answers the person gave on a form, for next time.
+pub async fn apply_remember(
+    State(app): State<Arc<App>>,
+    Json(req): Json<crate::jobs::assist::RememberRequest>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(json!({ "remembered": crate::jobs::assist::remember(&app, req).await? })))
+}
+
+/// Chrome extension: stuck on a page; ask the person over Telegram.
+pub async fn apply_escalate(
+    State(app): State<Arc<App>>,
+    Json(req): Json<crate::db::apply::EscalationIn>,
+) -> AppResult<Json<Value>> {
+    let (e, telegram) = crate::jobs::feedback::escalate(&app, req).await?;
+    Ok(Json(json!({ "id": e.id, "telegram": telegram })))
+}
+
+/// Chrome extension: poll an escalation for the person's reply.
+pub async fn apply_escalation(State(app): State<Arc<App>>, Path(id): Path<String>) -> AppResult<Json<Value>> {
+    let e = app.db.call(move |c| crate::db::apply::get_escalation(c, &id)).await?;
+    Ok(Json(crate::jobs::feedback::view(&e)))
+}
+
+#[derive(Deserialize)]
+pub struct ResolveBody {
+    status: String,
+}
+
+/// Chrome extension: the page got fixed (`done`) or it gave up (`skip`).
+pub async fn apply_resolve(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(b): Json<ResolveBody>,
+) -> AppResult<Json<Value>> {
+    let e = crate::jobs::feedback::resolve(&app, id, b.status).await?;
+    Ok(Json(crate::jobs::feedback::view(&e)))
+}
+
+#[derive(Deserialize)]
+pub struct EventsBody {
+    events: Vec<crate::db::apply::EventIn>,
+}
+
+/// Chrome extension: every failure (and outcome), for the feedback loop.
+pub async fn apply_events(State(app): State<Arc<App>>, Json(b): Json<EventsBody>) -> AppResult<Json<Value>> {
+    Ok(Json(json!({ "stored": crate::jobs::feedback::record_events(&app, b.events).await? })))
+}
+
+#[derive(Deserialize)]
+pub struct DaysQuery {
+    #[serde(default)]
+    days: Option<i64>,
+}
+
+/// Dashboard: what keeps failing in the applier, and where.
+pub async fn apply_events_summary(State(app): State<Arc<App>>, Query(q): Query<DaysQuery>) -> AppResult<Json<Value>> {
+    Ok(Json(crate::jobs::feedback::summary(&app, q.days.unwrap_or(7)).await?))
+}
+
 /// Dashboard: start a knowledge index run on the knowledge service.
 pub async fn knowledge_reindex(State(app): State<Arc<App>>) -> AppResult<(StatusCode, Json<Value>)> {
     let r = app
@@ -576,6 +643,14 @@ pub async fn knowledge_reindex(State(app): State<Arc<App>>) -> AppResult<(Status
         .remote()
         .ok_or_else(|| AppError::Validation("the knowledge service is not configured (KNOWLEDGE_SERVICE_URL)".into()))?;
     Ok((StatusCode::ACCEPTED, Json(r.reindex().await?)))
+}
+
+/// Dashboard: the shared job database's counts by status and platform.
+pub async fn job_links_status(State(app): State<Arc<App>>) -> AppResult<Json<Value>> {
+    if !app.cfg.jobs.links_enabled {
+        return Err(AppError::Validation("the job-links service is off (JOB_LINKS_ENABLED)".into()));
+    }
+    Ok(Json(crate::jobs::linkqueue::LinkQueueClient::from_app(&app).stats().await?))
 }
 
 /// Dashboard: index size, embedding coverage and the last run's report.
@@ -613,9 +688,34 @@ pub async fn audit_log(
 
 // ------------------------------------------------------------- operational
 
+/// "ok" when `url` answers 2xx within 2 s, else "down".
+async fn probe(app: &App, url: String) -> &'static str {
+    match app.http.get(url).timeout(Duration::from_secs(2)).send().await {
+        Ok(r) if r.status().is_success() => "ok",
+        _ => "down",
+    }
+}
+
 pub async fn health(State(app): State<Arc<App>>) -> Json<Value> {
     let db_ok = app.db.ping().await;
     let llm_ok = app.llm.health().await;
+    // Optional services: the agent keeps working without them.
+    let (knowledge, links) = tokio::join!(
+        async {
+            match app.knowledge.remote() {
+                Some(r) => probe(&app, format!("{}/readyz", r.base())).await,
+                None => "off",
+            }
+        },
+        async {
+            if app.cfg.jobs.links_enabled {
+                probe(&app, format!("{}/livez", app.cfg.jobs.links_url.trim_end_matches('/'))).await
+            } else {
+                "off"
+            }
+        }
+    );
+    let ok = db_ok && knowledge != "down" && links != "down";
     let browser = match &app.browser {
         None => "disabled",
         Some(b) => {
@@ -627,7 +727,7 @@ pub async fn health(State(app): State<Arc<App>>) -> Json<Value> {
         }
     };
     Json(json!({
-        "status": if db_ok { "ok" } else { "degraded" },
+        "status": if ok { "ok" } else { "degraded" },
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": app.started_at.elapsed().as_secs(),
         "checks": {
@@ -636,6 +736,8 @@ pub async fn health(State(app): State<Arc<App>>) -> Json<Value> {
             "llm_provider": app.llm.provider_name(),
             "browser_worker": browser,
             "telegram": if app.notifier.enabled() { "ok" } else { "disabled" },
+            "knowledge_service": knowledge,
+            "job_links": links,
         }
     }))
 }

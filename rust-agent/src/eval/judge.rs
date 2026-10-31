@@ -9,12 +9,18 @@ use super::{passed, Item, Outcome, Scores};
 use crate::app::App;
 use crate::knowledge::Scope;
 use crate::llm::{LlmRequest, LlmTask};
+use crate::prompts;
 
 const ANSWER_SYSTEM: &str = "You answer emails on behalf of the person whose knowledge is given. \
 Use ONLY the CONTEXT. If the answer is not in the context, say you will confirm and get back. \
 Never share government ID numbers, dates of birth or bank details by email. Reply in 1-3 sentences.";
 
-const JUDGE_SYSTEM: &str = "You are a strict evaluator of retrieval-augmented answers. Reply with JSON only.";
+fn judge_system() -> String {
+    format!(
+        "You are a strict evaluator of retrieval-augmented answers. {} Reply with JSON only.",
+        prompts::DATA_ONLY_RULE
+    )
+}
 
 #[derive(Deserialize)]
 struct Verdict {
@@ -36,8 +42,13 @@ pub async fn judge(app: &Arc<App>, question: &str, context: &str, answer: &str, 
     } else {
         format!("REFERENCE ANSWER:\n{reference}")
     };
+    // The question is often a raw email and the answer is model output: both
+    // (and the context) are data, so an email can't steer its own score.
+    let question = prompts::untrusted_block("QUESTION", &prompts::sanitize_untrusted(question, 4000).text);
+    let context = prompts::untrusted_block("CONTEXT", &prompts::sanitize_untrusted(context, 8000).text);
+    let answer = prompts::untrusted_block("ANSWER", &prompts::sanitize_untrusted(answer, 4000).text);
     let prompt = format!(
-        "QUESTION:\n{question}\n\nCONTEXT:\n{context}\n\nANSWER:\n{answer}\n\n{reference_part}\n\n\
+        "{question}\n\n{context}\n\n{answer}\n\n{reference_part}\n\n\
 Score the ANSWER:\n\
 - groundedness 1-5: 5 = every claim is supported by the CONTEXT; 1 = mostly unsupported.\n\
 - relevance 1-5: 5 = directly answers the QUESTION.\n\
@@ -46,7 +57,7 @@ Score the ANSWER:\n\
 - abstained: true if the answer declines or says it will confirm later.\n\
 JSON: {{\"groundedness\": n, \"relevance\": n, \"faithfulness\": n, \"accuracy\": n|null, \"abstained\": bool, \"notes\": \"one short sentence\"}}"
     );
-    let req = LlmRequest::new(LlmTask::Validate, JUDGE_SYSTEM, prompt).json().max_tokens(300);
+    let req = LlmRequest::new(LlmTask::Validate, judge_system(), prompt).json().max_tokens(300);
     let (v, _) = app.llm.complete_json::<Verdict>(&req).await?;
     Ok(Scores {
         groundedness: v.groundedness.clamp(1.0, 5.0),

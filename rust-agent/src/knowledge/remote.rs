@@ -38,6 +38,10 @@ impl KnowledgeClient {
         }
     }
 
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     fn is_open(&self) -> bool {
         now_secs() < self.open_until.load(Ordering::Relaxed)
     }

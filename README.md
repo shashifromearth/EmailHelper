@@ -6,21 +6,24 @@ uses local Ollama by default:
 - **Email Agent:** detects new mail in Thunderbird (Gmail, Outlook, Zoho,
   IMAP), classifies it, retrieves context, drafts a reply, validates it and
   saves it as a Thunderbird draft. **It never sends email.**
-- **Job Application Agent:** detects job opportunities in email, opens
-  postings with Playwright, scores them against your resume, generates cover
-  letters, fills forms, uploads your resume, and submits or asks you first.
-  When it gets stuck (CAPTCHA, OTP, unknown question) it pauses and asks on
-  Telegram, then resumes when you reply.
-- **Research Agent:** runs daily job discovery (SearXNG, RSS, Greenhouse,
-  Lever, Ashby, career pages), ranks the results, and finds recruiters and
-  hiring managers. It writes outreach drafts for your review.
+- **Job Application Agent:** finds the job links in email (text and HTML),
+  scores them against your profile and puts them in the shared job database
+  (`job-links`). The **Chrome extension** takes them one by one, fills each
+  application with answers from your knowledge (profile, past answers,
+  hybrid search plus an LLM) and the resume chosen for the job's stack.
+  You review and submit.
+- **Research Agent:** runs a daily worldwide job discovery across job APIs,
+  remote boards, ATS boards and search APIs, ranking remote, contract and
+  freelance roles first. It puts the jobs it keeps into the same job
+  database (with source, freshness and status) and finds recruiters for
+  outreach drafts.
 
 ```
-Thunderbird ─► MailExtension ─► Rust orchestrator (127.0.0.1:7800) ─► Email / Job / Research agents
-                                     │                                   │
-                                     ├─ SQLite + FTS5 knowledge base     ├─ Ollama · OpenAI · Gemini · Anthropic
-                                     ├─ Prometheus /metrics · Grafana    ├─ Browser worker (Playwright, 127.0.0.1:7801)
-                                     └─ Telegram bot (alerts + replies)  └─ SearXNG · RSS · ATS public APIs
+Thunderbird ─► MailExtension ─► email agent (7800) ─► knowledge service (7820, hybrid RAG search)
+                                     │    ▲                     ▲
+              research agent ────────┤    │ form answers        │ resume pick
+                                     ▼    │                     │
+                              job-links (7810, job DB) ◄── Chrome extension (applies, you submit)
 ```
 
 ## Quick start
@@ -53,6 +56,8 @@ same token in the extension options. Full steps are in
 | [TROUBLESHOOTING.md](documents/TROUBLESHOOTING.md) | Symptoms → fixes |
 | [FAQ.md](documents/FAQ.md) | Common questions |
 | [thunderbird-extension/README.md](thunderbird-extension/README.md) | Extension details |
+| [chrome-extension/README.md](chrome-extension/README.md) | Job applier: install, use, safety |
+| [job-links/README.md](job-links/README.md) | Shared job database API |
 | [browser-worker/README.md](browser-worker/README.md) | Playwright worker, logins, safety |
 | [docker/README.md](docker/README.md), [deploy/README.md](deploy/README.md) | Docker Compose, systemd, Windows task/service |
 
@@ -65,6 +70,10 @@ rust-agent/            Rust orchestrator (axum API, durable queue, agents, LLM r
   src/research/        sources (SearXNG/RSS/ATS) · discovery (daily) · recruiters
   tests/               end-to-end, job agent, research/Telegram, load tests
 thunderbird-extension/ MailExtension (new-mail detection, draft saving, popup, options)
+chrome-extension/      Job applier (MV3): queue → fill → you submit
+job-links/             Shared job database service (memory + snapshot, claim/result API)
+knowledge-service/     ETL, embeddings, hybrid search, resume choice
+knowledge-core/        People, profiles, resumes and ETL shared by the services
 browser-worker/        Node + Playwright service (extract, inspect, fill, upload, submit, LinkedIn)
 tests/mock-sites/      Mock Greenhouse / Lever / career portal / blocked pages for Playwright tests
 knowledge.example/     Sample profile JSON, tone, company profile, approved responses (copy to knowledge/)

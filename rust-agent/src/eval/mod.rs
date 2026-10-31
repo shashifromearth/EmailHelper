@@ -90,7 +90,8 @@ pub struct Summary {
     pub relevance: f64,
     pub faithfulness: f64,
     pub accuracy: f64,
-    pub retrieval_hit_rate: f64,
+    /// None when no item names the documents it expects.
+    pub retrieval_hit_rate: Option<f64>,
     pub safety_violations: usize,
     pub errors: usize,
 }
@@ -136,7 +137,7 @@ pub fn summarize(outcomes: &[&Outcome]) -> Summary {
         relevance: mean(ok.iter().map(|o| o.scores.relevance)),
         faithfulness: mean(ok.iter().map(|o| o.scores.faithfulness)),
         accuracy: mean(ok.iter().filter_map(|o| o.scores.accuracy)),
-        retrieval_hit_rate: if hits.is_empty() { 0.0 } else { (hits.iter().filter(|h| **h).count() as f64 / hits.len() as f64 * 1000.0).round() / 10.0 },
+        retrieval_hit_rate: (!hits.is_empty()).then(|| (hits.iter().filter(|h| **h).count() as f64 / hits.len() as f64 * 1000.0).round() / 10.0),
         safety_violations: outcomes.iter().filter(|o| !o.safe).count(),
         errors: outcomes.iter().filter(|o| o.error.is_some()).count(),
     }
@@ -177,6 +178,24 @@ pub fn write_dataset(path: &Path, items: &[Item]) -> AppResult<()> {
 }
 
 /// Answer and judge every item; write the JSON + Markdown report.
+/// `n` items taken in turn from each scenario, so a short run still covers
+/// every kind of question.
+pub fn sample(items: Vec<Item>, n: usize) -> Vec<Item> {
+    let mut by: BTreeMap<Scenario, std::collections::VecDeque<Item>> = BTreeMap::new();
+    for it in items {
+        by.entry(it.scenario).or_default().push_back(it);
+    }
+    let mut out = Vec::new();
+    while out.len() < n && by.values().any(|q| !q.is_empty()) {
+        for q in by.values_mut() {
+            if out.len() < n {
+                out.extend(q.pop_front());
+            }
+        }
+    }
+    out
+}
+
 pub async fn run(app: &Arc<App>, items: &[Item]) -> AppResult<(Report, PathBuf)> {
     let mut outcomes = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
@@ -199,8 +218,15 @@ pub async fn run(app: &Arc<App>, items: &[Item]) -> AppResult<(Report, PathBuf)>
 pub fn markdown(r: &Report) -> String {
     let row = |name: &str, s: &Summary| {
         format!(
-            "| {name} | {} | {}% | {} | {} | {} | {} | {}% | {} |\n",
-            s.items, s.pass_rate, s.groundedness, s.relevance, s.faithfulness, s.accuracy, s.retrieval_hit_rate, s.safety_violations
+            "| {name} | {} | {}% | {} | {} | {} | {} | {} | {} |\n",
+            s.items,
+            s.pass_rate,
+            s.groundedness,
+            s.relevance,
+            s.faithfulness,
+            s.accuracy,
+            s.retrieval_hit_rate.map(|r| format!("{r}%")).unwrap_or_else(|| "–".into()),
+            s.safety_violations
         )
     };
     let mut out = String::from("# RAG evaluation\n\n| Scenario | Items | Pass | Groundedness (1-5) | Relevance (1-5) | Faithfulness (0-1) | Accuracy (1-5) | Retrieval hit | Safety violations |\n|---|---|---|---|---|---|---|---|---|\n");
@@ -245,12 +271,23 @@ mod tests {
     }
 
     #[test]
+    fn short_runs_cover_every_scenario() {
+        let mk = |s| outcome(s, 5.0, true).item;
+        let items = vec![mk(Scenario::Facts), mk(Scenario::Facts), mk(Scenario::Facts), mk(Scenario::Privacy), mk(Scenario::Grounded)];
+        let picked: Vec<Scenario> = sample(items, 4).iter().map(|i| i.scenario).collect();
+        assert_eq!(picked.len(), 4);
+        for s in [Scenario::Facts, Scenario::Privacy, Scenario::Grounded] {
+            assert!(picked.contains(&s), "{s:?} missing from {picked:?}");
+        }
+    }
+
+    #[test]
     fn summary_and_pass_rules() {
         let o = vec![outcome(Scenario::Facts, 5.0, true), outcome(Scenario::Facts, 2.0, true), outcome(Scenario::Privacy, 5.0, false)];
         let r = report(&o);
         assert_eq!(r.overall.passed, 1);
         assert_eq!(r.overall.safety_violations, 1, "a leaked private value always fails");
-        assert_eq!(r.by_scenario[&Scenario::Facts].retrieval_hit_rate, 50.0);
+        assert_eq!(r.by_scenario[&Scenario::Facts].retrieval_hit_rate, Some(50.0));
         assert!(markdown(&r).contains("| **all** | 3 |"));
     }
 }

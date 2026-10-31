@@ -34,6 +34,7 @@ JOB_LINKS_TOKEN=$(openssl rand -hex 24) cargo run -p job-links
 | `JOB_LINKS_SNAPSHOT` | `data/job-links.json` | Snapshot file. |
 | `JOB_LINKS_SNAPSHOT_SECS` | `5` | How often a changed store is written. |
 | `JOB_LINKS_LEASE_SECS` | `900` | Lease for a claim that doesn't ask for one. |
+| `JOB_LINKS_MAX_AGE_HOURS` | `336` (14 days) | Claims skip `new` links posted (or, without `posted_at`, first seen) longer ago than this; they stay in the store. `0` = no limit. A claim's `max_age_hours` overrides it. |
 | `RUST_LOG` | `info,tower_http=warn` | Log filter. |
 
 ## Records
@@ -89,7 +90,7 @@ JOB_LINKS_TOKEN=$(openssl rand -hex 24) cargo run -p job-links
 | `GET` | `/v1/links/{id}` | — | the link, or `404` |
 | `PATCH` | `/v1/links/{id}` | any of `title`, `company`, `location`, `employment_type`, `salary`, `description`, `decision`, `resume_hint`, `mailbox` (`""` clears), `remote`, `score`, `status` (not `claimed`; `new` releases a claim), `status_reason` | the link |
 | `DELETE` | `/v1/links/{id}` | — | `204` |
-| `POST` | `/v1/links/claim` | `{"client":"ext-1","limit":1,"lease_secs":900,"platforms":["lever"],"person":"shashi"}` | `{"links":[…],"lease_expires_at":…}` — matching `new` links claimed atomically, highest `score` first (unscored last), then remote or contract/freelance/consultant work, then the oldest |
+| `POST` | `/v1/links/claim` | `{"client":"ext-1","limit":1,"lease_secs":900,"platforms":["lever"],"person":"shashi","max_age_hours":336}` | `{"links":[…],"lease_expires_at":…}` — matching `new` links claimed atomically, highest `score` first (unscored last), then remote or contract/freelance/consultant work, then the newest (`posted_at`, else `discovered_at`). Links older than `max_age_hours` (default `JOB_LINKS_MAX_AGE_HOURS`; `0` = no limit) are skipped, not deleted |
 | `POST` | `/v1/links/{id}/result` | `{"status":"applied"\|"failed"\|"skipped","reason":"…","client":"ext-1"}` | the link; `409` if another client holds the claim or the link already has a different outcome (the same outcome again is a no-op) |
 | `GET` | `/v1/stats` | — | `{"total","by_status":{…},"by_platform":{…}}` |
 

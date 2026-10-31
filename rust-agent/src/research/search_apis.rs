@@ -69,20 +69,36 @@ pub fn platform(url: &str) -> Option<&'static str> {
         .map(|s| s.name)
 }
 
+/// One query term. `a|b` is a choice, `("a" OR "b")`, which Google and Brave
+/// both understand: several roles or stacks share one query.
+fn query_term(t: &str, always_quote: bool) -> String {
+    let quote = |w: &str| if always_quote || w.contains(' ') { format!("\"{w}\"") } else { w.to_string() };
+    let alts: Vec<String> = t.split('|').map(str::trim).filter(|w| !w.is_empty()).map(quote).collect();
+    match alts.as_slice() {
+        [one] => one.clone(),
+        many => format!("({})", many.join(" OR ")),
+    }
+}
+
 /// Every query for the configured roles, stacks and sites. Role and stack
 /// pairs are the outer loop so each day's window spans several sites.
 pub fn queries(cfg: &ApiSourcesConfig) -> Vec<String> {
-    let quote = |t: &str| if t.contains(' ') { format!("\"{t}\"") } else { t.to_string() };
     let sites: Vec<&Site> = cfg
         .search_sites
         .iter()
         .filter_map(|n| SITE_TABLE.iter().find(|s| s.name.eq_ignore_ascii_case(n.trim())))
         .collect();
+    let terms = |list: &[String], always_quote: bool| -> Vec<String> {
+        list.iter()
+            .filter(|t| t.split('|').any(|w| !w.trim().is_empty()))
+            .map(|t| query_term(t, always_quote))
+            .collect()
+    };
     let mut out = Vec::new();
-    for role in &cfg.search_roles {
-        for stack in &cfg.search_stacks {
+    for role in terms(&cfg.search_roles, true) {
+        for stack in terms(&cfg.search_stacks, false) {
             for s in &sites {
-                out.push(format!("{} \"{}\" {}", s.query, role.trim(), quote(stack.trim())));
+                out.push(format!("{} {role} {stack}", s.query));
             }
         }
     }
@@ -404,6 +420,30 @@ mod tests {
         assert_eq!(q.len(), 4);
         assert_eq!(q[0], "site:linkedin.com/jobs/view \"architect\" python");
         assert_eq!(q[3], "site:naukri.com/job-listings \"architect\" \"generative ai\"");
+    }
+
+    #[test]
+    fn alternatives_share_one_query() {
+        let cfg = crate::config::Config::from_lookup(|k| match k {
+            "RESEARCH_SEARCH_ROLES" => Some("tech lead|staff engineer; |".into()),
+            "RESEARCH_SEARCH_STACKS" => Some("c#|.net;generative ai|agentic ai".into()),
+            "RESEARCH_SEARCH_SITES" => Some("linkedin".into()),
+            _ => None,
+        })
+        .unwrap();
+        let q = queries(&cfg.research.apis);
+        assert_eq!(
+            q,
+            [
+                "site:linkedin.com/jobs/view (\"tech lead\" OR \"staff engineer\") (c# OR .net)",
+                "site:linkedin.com/jobs/view (\"tech lead\" OR \"staff engineer\") (\"generative ai\" OR \"agentic ai\")",
+            ]
+        );
+        // the defaults stay within a few hundred queries (rotated over days)
+        let d = crate::config::Config::from_lookup(|_| None).unwrap();
+        let n = queries(&d.research.apis).len();
+        assert!(n <= 6 * 6 * SITES.len(), "{n}");
+        assert!(d.research.apis.search_stacks.iter().any(|s| s.split('|').any(|w| w == "c#")));
     }
 
     #[test]

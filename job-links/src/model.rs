@@ -269,6 +269,11 @@ pub struct ClaimRequest {
     pub platforms: Option<Vec<Platform>>,
     #[serde(default)]
     pub person: Option<String>,
+    /// Skip `new` links posted (or, without a date, first seen) more than
+    /// this many hours ago; `0` = no limit. Unset = the service default
+    /// (`JOB_LINKS_MAX_AGE_HOURS`). Old links are skipped, not deleted.
+    #[serde(default)]
+    pub max_age_hours: Option<u64>,
 }
 
 /// `POST /v1/links/{id}/result`.

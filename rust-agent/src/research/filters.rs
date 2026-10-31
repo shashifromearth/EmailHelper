@@ -294,13 +294,12 @@ pub fn check(j: &RawJob, c: &Criteria, now: DateTime<Utc>) -> Result<Vec<String>
     if !engineering_title(&j.details.title) {
         return Err("not an engineering role".into());
     }
-    if let Some(h) = c.max_age_hours {
-        match j.posted_at {
-            None => return Err("no posting date".into()),
-            Some(t) if now.signed_duration_since(t) > chrono::Duration::hours(h as i64) => {
-                return Err(format!("posted more than {h} h ago"))
-            }
-            _ => {}
+    // Undated postings (SearXNG hits, career pages) are exempt from the age
+    // rule and judged on the rest. They count as first seen now: the job store
+    // dedupes by URL, so one seen on an earlier day is not new again.
+    if let (Some(h), Some(t)) = (c.max_age_hours, j.posted_at) {
+        if now.signed_duration_since(t) > chrono::Duration::hours(h as i64) {
+            return Err(format!("posted more than {h} h ago"));
         }
     }
     if c.require_remote && !is_remote(j) {
@@ -382,7 +381,9 @@ mod tests {
         assert!(check(&raw("Python Dev", Some("Worldwide"), "", Some("contract"), 30), &c, now).unwrap_err().contains("25 h"));
         let mut nodate = raw("Python Dev", Some("Worldwide"), "", Some("contract"), 1);
         nodate.posted_at = None;
-        assert_eq!(check(&nodate, &c, now).unwrap_err(), "no posting date");
+        assert_eq!(check(&nodate, &c, now).unwrap(), vec!["python"], "no date: exempt from the age rule");
+        nodate.region = Some("USA".into());
+        assert!(check(&nodate, &c, now).is_err(), "but still judged on everything else");
         assert!(check(&raw("Python Dev", Some("USA"), "", Some("contract"), 1), &c, now).unwrap_err().contains("only for applicants in USA"));
         assert!(check(&raw("Python Dev", Some("Europe, UK"), "", Some("contract"), 1), &c, now).is_err());
         let us_only = raw("Python Dev", Some("Remote"), "You must be located in the US to apply.", Some("contract"), 1);

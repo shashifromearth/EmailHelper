@@ -37,11 +37,30 @@ pub struct Validation {
 
 pub struct ValidationInput<'a> {
     pub draft: &'a str,
-    /// Trusted + incoming text the draft may draw facts from.
+    /// Trusted text the draft may draw facts from (knowledge, FACTS, the
+    /// person's own details).
     pub grounding: &'a str,
+    /// Third-party text (incoming email + thread). Contact details, links and
+    /// amounts found only here are flagged, never accepted.
+    pub incoming: &'a str,
+    /// The sender's address; replying to it is always fine.
+    pub sender: &'a str,
     pub classification_confidence: f32,
     pub injection_flags: &'a [String],
 }
+
+/// Commitments a draft must not make on the person's behalf unless a trusted
+/// source says so. `true` marks phrases followed by a date, which are fine
+/// when that date is in the trusted sources (e.g. a joining date in FACTS).
+const COMMITMENTS: &[(&str, bool)] = &[
+    ("i accept the offer", false),
+    ("i accept your offer", false),
+    ("i confirm i will join", false),
+    ("i will join on", true),
+    ("we will deliver by", false),
+    ("i agree to the terms", false),
+    ("i am available to start on", true),
+];
 
 fn re(cell: &'static OnceLock<Regex>, pat: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pat).expect("valid regex"))
@@ -93,6 +112,152 @@ fn phones_in(s: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Byte offsets where `phrase` occurs as whole words in `text`.
+fn phrase_at(text: &str, phrase: &str) -> Vec<usize> {
+    text.match_indices(phrase)
+        .map(|(i, _)| i)
+        .filter(|&i| {
+            let before = text[..i].chars().next_back();
+            let after = text[i + phrase.len()..].chars().next();
+            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+        })
+        .collect()
+}
+
+/// The date after a dated commitment ("… start on 1 December 2026") is backed
+/// when a trusted source contains it.
+fn date_backed(tail: &str, grounding_lower: &str) -> bool {
+    let words: Vec<&str> = tail.split_whitespace().take(4).collect();
+    (1..=words.len()).any(|n| {
+        let joined = words[..n].join(" ");
+        let d = joined.trim_end_matches(|c: char| !c.is_alphanumeric());
+        d.len() >= 6 && d.chars().any(|c| c.is_ascii_digit()) && !phrase_at(grounding_lower, d).is_empty()
+    })
+}
+
+fn commitment_notes(draft_lower: &str, grounding_lower: &str) -> Vec<String> {
+    let text = draft_lower.replace('\u{2019}', "'").replace("i'm ", "i am ");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut notes = Vec::new();
+    for (phrase, dated) in COMMITMENTS {
+        if !phrase_at(grounding_lower, phrase).is_empty() {
+            continue;
+        }
+        let unbacked = phrase_at(&text, phrase)
+            .into_iter()
+            .any(|at| !*dated || !date_backed(&text[at + phrase.len()..], grounding_lower));
+        if unbacked {
+            notes.push(format!("policy: commitment \"{phrase}\" not backed by knowledge base or facts"));
+        }
+    }
+    notes
+}
+
+/// True when a digit run isn't part of a longer number ("+91 …", a card).
+fn isolated(text: &str, start: usize, end: usize) -> bool {
+    let joins = |c: &[char]| match c {
+        [d, ..] if d.is_ascii_digit() || *d == '+' => true,
+        [s, d, ..] => (*s == ' ' || *s == '-') && d.is_ascii_digit(),
+        _ => false,
+    };
+    let before: Vec<char> = text[..start].chars().rev().take(2).collect();
+    let after: Vec<char> = text[end..].chars().take(2).collect();
+    !joins(&before) && !joins(&after)
+}
+
+fn luhn(digits: &str) -> bool {
+    let sum: u32 = digits
+        .chars()
+        .rev()
+        .filter_map(|c| c.to_digit(10))
+        .enumerate()
+        .map(|(i, d)| match (i % 2 == 1, d * 2) {
+            (true, x) if x > 9 => x - 9,
+            (true, x) => x,
+            _ => d,
+        })
+        .sum();
+    sum.is_multiple_of(10)
+}
+
+fn iban_valid(compact: &str) -> bool {
+    if !(15..=34).contains(&compact.len()) {
+        return false;
+    }
+    let (head, tail) = compact.split_at(4);
+    let mut rem: u32 = 0;
+    for c in tail.chars().chain(head.chars()) {
+        let Some(v) = c.to_digit(36) else {
+            return false;
+        };
+        rem = if v >= 10 { (rem * 100 + v) % 97 } else { (rem * 10 + v) % 97 };
+    }
+    rem == 1
+}
+
+/// Government IDs and financial identifiers in a final draft, by kind (never
+/// the values). Values in `approved` (the person's private facts, filled in
+/// from placeholders) are skipped.
+pub fn pii_kinds(text: &str, approved: &[&str]) -> Vec<&'static str> {
+    fn norm(s: &str) -> String {
+        s.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_ascii_lowercase()
+    }
+    let approved: Vec<String> = approved.iter().map(|a| norm(a)).filter(|a| !a.is_empty()).collect();
+    let ok = |v: &str| approved.contains(&norm(v));
+    static PAN: OnceLock<Regex> = OnceLock::new();
+    static AADHAAR: OnceLock<Regex> = OnceLock::new();
+    static SSN: OnceLock<Regex> = OnceLock::new();
+    static CARD: OnceLock<Regex> = OnceLock::new();
+    static IBAN: OnceLock<Regex> = OnceLock::new();
+    static DOB: OnceLock<Regex> = OnceLock::new();
+    let mut kinds = Vec::new();
+    let mut add = |k: &'static str| {
+        if !kinds.contains(&k) {
+            kinds.push(k);
+        }
+    };
+    if re(&PAN, r"\b[A-Z]{5}[0-9]{4}[A-Z]\b").find_iter(text).any(|m| !ok(m.as_str())) {
+        add("PAN");
+    }
+    if re(&AADHAAR, r"\b[2-9]\d{3}[ -]?\d{4}[ -]?\d{4}\b")
+        .find_iter(text)
+        .any(|m| isolated(text, m.start(), m.end()) && !ok(m.as_str()))
+    {
+        add("Aadhaar number");
+    }
+    if re(&SSN, r"\b\d{3}-\d{2}-\d{4}\b")
+        .find_iter(text)
+        .any(|m| isolated(text, m.start(), m.end()) && !ok(m.as_str()))
+    {
+        add("SSN");
+    }
+    if re(&CARD, r"\b\d(?:[ -]?\d){12,18}\b").find_iter(text).any(|m| {
+        isolated(text, m.start(), m.end()) && luhn(&norm(m.as_str())) && !ok(m.as_str())
+    }) {
+        add("card number");
+    }
+    if re(&IBAN, r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b")
+        .find_iter(text)
+        .any(|m| iban_valid(&m.as_str().replace(' ', "")) && !ok(m.as_str()))
+    {
+        add("IBAN");
+    }
+    const MONTH: &str = "(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
+    let dob = re(
+        &DOB,
+        &format!(
+            r"(?i)(?:\bdob\b|\bd\.o\.b\b\.?|\bdate of birth\b|\bbirth ?date\b|\bborn on\b)[^\d\n.;]{{0,25}}?(\d{{1,2}}[-/. ]\d{{1,2}}[-/. ]\d{{2,4}}|\d{{4}}[-/.]\d{{1,2}}[-/.]\d{{1,2}}|\d{{1,2}}(?:st|nd|rd|th)?[ -]{MONTH},?[ -]\d{{2,4}}|{MONTH} \d{{1,2}}(?:st|nd|rd|th)?,? \d{{4}})"
+        ),
+    );
+    if dob.captures_iter(text).any(|c| c.get(1).is_some_and(|d| !ok(d.as_str()))) {
+        add("date of birth");
+    }
+    kinds
+}
+
 /// Deterministic validation rules.
 pub fn rule_checks(i: &ValidationInput<'_>) -> Vec<String> {
     let mut notes = Vec::new();
@@ -138,29 +303,63 @@ pub fn rule_checks(i: &ValidationInput<'_>) -> Vec<String> {
             notes.push(format!("policy: commitment \"{}\" not backed by knowledge base", m.as_str()));
         }
     }
-    let ground_emails = emails_in(i.grounding);
+    notes.extend(commitment_notes(&lower, &grounding_lower));
+    // Only trusted text grounds contact details and amounts. One that appears
+    // only in the incoming email (e.g. a phishing "pay here" link) is echoed,
+    // not grounded, so it goes to review. Replying to the sender is fine.
+    let sender = i.sender.trim().to_ascii_lowercase();
+    let mut echoed: Vec<String> = Vec::new();
+    let (ground_emails, in_emails) = (emails_in(i.grounding), emails_in(i.incoming));
     for e in emails_in(draft).difference(&ground_emails) {
-        notes.push(format!(
-            "hallucination risk: email address {e} not in sources"
-        ));
+        if *e == sender {
+            continue;
+        }
+        if in_emails.contains(e) {
+            echoed.push(format!("email {e}"));
+        } else {
+            notes.push(format!(
+                "hallucination risk: email address {e} not in sources"
+            ));
+        }
     }
-    let ground_urls = urls_in(i.grounding);
+    let known = |set: &HashSet<String>, u: &str| {
+        set.iter()
+            .any(|g| g.starts_with(u) || u.starts_with(g.as_str()))
+    };
+    let (ground_urls, in_urls) = (urls_in(i.grounding), urls_in(i.incoming));
     for u in urls_in(draft) {
-        if !ground_urls
-            .iter()
-            .any(|g| g.starts_with(&u) || u.starts_with(g.as_str()))
-        {
+        if known(&ground_urls, u.as_str()) {
+            continue;
+        }
+        if known(&in_urls, u.as_str()) {
+            echoed.push(format!("link {u}"));
+        } else {
             notes.push(format!("hallucination risk: link {u} not in sources"));
         }
     }
-    let ground_money = money_in(i.grounding);
+    let (ground_money, in_money) = (money_in(i.grounding), money_in(i.incoming));
     for m in money_in(draft).difference(&ground_money) {
-        notes.push(format!("hallucination risk: amount {m} not in sources"));
+        if in_money.contains(m) {
+            echoed.push(format!("amount {m}"));
+        } else {
+            notes.push(format!("hallucination risk: amount {m} not in sources"));
+        }
     }
-    let ground_phones = phones_in(i.grounding);
+    let (ground_phones, in_phones) = (phones_in(i.grounding), phones_in(i.incoming));
     for p in phones_in(draft).difference(&ground_phones) {
+        if in_phones.contains(p) {
+            echoed.push(format!("phone {p}"));
+        } else {
+            notes.push(format!(
+                "hallucination risk: phone number {p} not in sources"
+            ));
+        }
+    }
+    if !echoed.is_empty() {
+        echoed.sort();
         notes.push(format!(
-            "hallucination risk: phone number {p} not in sources"
+            "repeats contact details from the incoming email: {}",
+            echoed.join(", ")
         ));
     }
     if !i.injection_flags.is_empty() {
@@ -210,7 +409,11 @@ pub async fn validate(llm: &LlmRouter, i: &ValidationInput<'_>, use_llm: bool) -
             confidence: 0.75,
         };
     }
-    let source = prompts::sanitize_untrusted(i.grounding, 6000).text;
+    let source = prompts::sanitize_untrusted(
+        &format!("{}\n\nINCOMING EMAIL (third party):\n{}", i.grounding, i.incoming),
+        6000,
+    )
+    .text;
     let draft = prompts::sanitize_untrusted(i.draft, 4000).text;
     let req = LlmRequest::new(
         LlmTask::Validate,
@@ -264,6 +467,8 @@ mod tests {
         ValidationInput {
             draft,
             grounding,
+            incoming: "",
+            sender: "",
             classification_confidence: 0.9,
             injection_flags: &[],
         }
@@ -301,11 +506,11 @@ mod tests {
     #[test]
     fn numbers_on_separate_lines_are_not_joined() {
         let n = rule_checks(&input(
-            "1. Contact Number: +91 9217154759
+            "1. Contact Number: +91 9000012345
 3. Email Address: a@b.test
 27. Last Working Day: 19-06-2026
 28. Joining: Immediately",
-            "Phone number: +91 9217154759
+            "Phone number: +91 9000012345
 Email: a@b.test
 Last working day: 19-06-2026",
         ));
@@ -339,6 +544,8 @@ Last working day: 19-06-2026",
         let n = rule_checks(&ValidationInput {
             draft: "Thanks for the message, I will look into it and get back to you shortly.",
             grounding: "",
+            incoming: "",
+            sender: "",
             classification_confidence: 0.3,
             injection_flags: &flags,
         });
@@ -346,5 +553,103 @@ Last working day: 19-06-2026",
         assert!(n
             .iter()
             .any(|x| x.contains("low classification confidence")));
+    }
+
+    #[test]
+    fn details_only_in_the_incoming_email_are_flagged() {
+        let incoming = "From your bank: we guarantee a refund. Verify at https://secure-bank.example.net/login \
+or call +1 415 555 0199, or write to help@secure-bank.example.net. Fee: $250.";
+        let n = rule_checks(&ValidationInput {
+            draft: "Hi, thanks. I will verify at https://secure-bank.example.net/login and call +1 415 555 0199 \
+or email help@secure-bank.example.net about the $250 fee; you guarantee it.",
+            grounding: "Standard plan: $49 per seat per month.",
+            incoming,
+            sender: "alerts@bank.example",
+            classification_confidence: 0.9,
+            injection_flags: &[],
+        });
+        let echo = n
+            .iter()
+            .find(|x| x.starts_with("repeats contact details from the incoming email"))
+            .unwrap_or_else(|| panic!("{n:?}"));
+        for part in ["help@secure-bank.example.net", "secure-bank.example.net/login", "amount 250", "phone 14155550199"] {
+            assert!(echo.contains(part), "{echo}");
+        }
+        assert!(n.iter().any(|x| x.contains("\"guarantee\"")), "email wording is not a source: {n:?}");
+        // Replying to the sender's own address, or using the person's own
+        // details, is fine.
+        let ok = rule_checks(&ValidationInput {
+            draft: "Hi Jane, I have noted jane@acme.com and will write back from asha@me.example shortly.",
+            grounding: "[my details]\nasha@me.example",
+            incoming: "Please reply to jane@acme.com",
+            sender: "Jane@Acme.com",
+            classification_confidence: 0.9,
+            injection_flags: &[],
+        });
+        assert!(ok.is_empty(), "{ok:?}");
+    }
+
+    #[test]
+    fn flags_commitments_unless_backed() {
+        let n = rule_checks(&input(
+            "Thank you. I accept the offer and I agree to the terms. I am available to start on 1 December 2026.",
+            "Notice period: 30 days",
+        ));
+        for p in ["i accept the offer", "i agree to the terms", "i am available to start on"] {
+            assert!(n.iter().any(|x| x.contains(p)), "{p}: {n:?}");
+        }
+        // A start date taken from FACTS is fine; "I'm" counts as "I am".
+        let ok = rule_checks(&input(
+            "Thank you for the update. I'm available to start on 1 December 2026, as discussed earlier.",
+            "FACTS (trusted):\nEarliest joining date: 1 December 2026",
+        ));
+        assert!(ok.is_empty(), "{ok:?}");
+        let n = rule_checks(&input(
+            "Thank you for the update. I am available to start on 1 December 2026, as discussed earlier.",
+            "FACTS (trusted):\nEarliest joining date: 11 December 2026",
+        ));
+        assert!(n.iter().any(|x| x.contains("available to start on")), "{n:?}");
+        // Whole phrases only.
+        let ok = rule_checks(&input(
+            "Before I accept the offering terms I need to review them with my team this week.",
+            "",
+        ));
+        assert!(!ok.iter().any(|x| x.starts_with("policy")), "{ok:?}");
+    }
+
+    #[test]
+    fn pii_scan_finds_ids_and_skips_approved_values() {
+        let kinds = |t: &str| pii_kinds(t, &[]);
+        assert_eq!(kinds("My PAN is ABCDE1234F."), vec!["PAN"]);
+        assert_eq!(kinds("Aadhaar: 2345 6789 0123"), vec!["Aadhaar number"]);
+        assert_eq!(kinds("Aadhaar: 234567890123"), vec!["Aadhaar number"]);
+        assert_eq!(kinds("SSN 123-45-6789"), vec!["SSN"]);
+        assert_eq!(kinds("Card: 4111 1111 1111 1111"), vec!["card number"]);
+        assert_eq!(kinds("Card: 4111-1111-1111-1111"), vec!["card number"]);
+        assert_eq!(kinds("IBAN GB82 WEST 1234 5698 7654 32 for the transfer"), vec!["IBAN"]);
+        assert_eq!(kinds("IBAN GB82WEST12345698765432"), vec!["IBAN"]);
+        assert_eq!(kinds("DOB: 02/01/1990"), vec!["date of birth"]);
+        assert_eq!(kinds("My date of birth is 2 January 1990."), vec!["date of birth"]);
+        assert_eq!(kinds("Date of birth (DD-MM-YYYY): 02-01-1990"), vec!["date of birth"]);
+        assert_eq!(kinds("born on March 3, 1991"), vec!["date of birth"]);
+
+        // Ordinary numbers are not IDs.
+        for clean in [
+            "Call me on +91 98765 43210 or +91 9000012345.",
+            "Last working day: 19-06-2026. Expected CTC: 35 LPA.",
+            "Card ending 4111 1111 1111 1112 (fails the checksum).",
+            "We hire across PAN India; invoice INV-2026-0042.",
+            "(Date of birth provided). Last working day: 19-06-2026",
+            "IBAN GB00 WEST 1234 5698 7654 32 (bad checksum)",
+            "Reference 1234 5678 9012 3456 7890 1234",
+        ] {
+            assert!(kinds(clean).is_empty(), "{clean}: {:?}", kinds(clean));
+        }
+
+        // Values the person approved (filled from placeholders) are allowed;
+        // others in the same draft are not.
+        let text = "PAN: ABCDE1234F, DOB: 02-01-1990, Aadhaar 2345-6789-0123";
+        assert_eq!(pii_kinds(text, &["ABCDE1234F", "02-01-1990"]), vec!["Aadhaar number"]);
+        assert!(pii_kinds(text, &["ABCDE1234F", "02-01-1990", "2345 6789 0123"]).is_empty());
     }
 }

@@ -26,6 +26,8 @@ pub struct DiscoveryReport {
     pub dropped: std::collections::BTreeMap<String, usize>,
     /// Applications started for new matches.
     pub applying: usize,
+    /// Jobs handed to the job-links service (`JOB_LINKS_ENABLED`).
+    pub queued: usize,
     /// Every job kept this run, with what other services need to act on it.
     pub kept: Vec<KeptJob>,
 }
@@ -205,10 +207,7 @@ async fn collect(app: &App, report: &mut DiscoveryReport) -> Vec<RawJob> {
     for board in &r.remote_boards {
         let urls: Vec<String> = match r.remote_board_urls.iter().find(|(b, _)| b == board) {
             Some((_, u)) => vec![u.clone()],
-            None => crate::research::remote_boards::default_urls(board)
-                .iter()
-                .map(|u| u.to_string())
-                .collect(),
+            None => crate::research::remote_boards::search_urls(board, &r.tech_stack),
         };
         let mut seen_urls = std::collections::HashSet::new();
         for url in urls {
@@ -234,6 +233,46 @@ fn extension_platform(source: &str) -> Option<&str> {
     crate::research::search_apis::PROVIDERS
         .contains(&provider)
         .then_some(site)
+}
+
+/// `JOB_LINKS_ENABLED`: every kept job worth applying to goes to the shared
+/// job database, where the Chrome extension applies from. Returns the
+/// service's counts and the URLs sent.
+async fn queue_kept(
+    app: &Arc<App>,
+    person: &crate::knowledge::Person,
+    kept: &[KeptJob],
+) -> AppResult<(crate::jobs::linkqueue::UpsertSummary, std::collections::HashSet<String>)> {
+    use crate::jobs::linkqueue::{LinkQueueClient, LinkSource, QueuedLink};
+    let links: Vec<QueuedLink> = kept
+        .iter()
+        .filter(|k| k.decision != Decision::Skip.as_str())
+        .filter_map(|k| {
+            Some(QueuedLink {
+                url: k.url.clone()?,
+                source: LinkSource::Research,
+                source_detail: Some(k.source.clone()),
+                title: Some(k.title.clone()),
+                company: k.company.clone(),
+                location: k.location.clone(),
+                remote: k.remote.clone(),
+                employment_type: k.employment_type.clone(),
+                salary: k.salary.clone(),
+                skills: k.skills.clone(),
+                description: k.description_excerpt.clone(),
+                score: Some(k.score.clamp(0, 100) as u8),
+                decision: Some(k.decision.clone()),
+                person_id: crate::jobs::person_id_of(person),
+                resume_hint: person
+                    .select_resume(&k.skills, Some(crate::knowledge::people::JOB_SEEKING))
+                    .map(|(r, _)| r.file_name.clone()),
+                posted_at: k.posted_at,
+                ..Default::default()
+            })
+        })
+        .collect();
+    let summary = LinkQueueClient::from_app(app).upsert(&links).await?;
+    Ok((summary, links.into_iter().map(|l| l.url).collect()))
 }
 
 /// Run one discovery pass.
@@ -327,6 +366,20 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
     // Remote and contract/freelance jobs first: match score plus the boost.
     scored.sort_by_key(|(r, _, boost, _)| std::cmp::Reverse(r.score.unwrap_or(0) + boost));
     report.kept.sort_by_key(|k| std::cmp::Reverse(k.score + k.priority_boost));
+    let mut queued_urls = std::collections::HashSet::new();
+    if app.cfg.jobs.links_enabled {
+        match queue_kept(app, &research_person, &report.kept).await {
+            Ok((s, urls)) => {
+                queued_urls = urls;
+                report.queued = s.created + s.updated;
+                tracing::info!(created = s.created, updated = s.updated, failed = s.failed, "research jobs queued in job-links");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not queue research jobs in job-links");
+                report.errors.push(format!("job-links: {e}"));
+            }
+        }
+    }
     let top_n = app.cfg.research.summary_top_n;
     report.top = scored
         .iter()
@@ -354,6 +407,8 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
             } else {
                 rec.decision_reasons.join("; ")
             })
+        } else if rec.details.url.as_ref().is_some_and(|u| queued_urls.contains(u)) {
+            Some("queued for the Chrome extension".into())
         } else if let Some(site) = extension_platform(&rec.source) {
             Some(format!("{site} posting: apply with the browser extension"))
         } else if !app.cfg.jobs.enabled {
@@ -432,6 +487,9 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
         let mut first = vec!["remote".to_string()];
         first.extend(rc.preferred_work_types.iter().cloned());
         text.push_str(&format!("Ranked first: {}\n", first.join("/")));
+    }
+    if report.queued > 0 {
+        text.push_str(&format!("Queued for the Chrome extension: {}\n", report.queued));
     }
     if !report.dropped.is_empty() {
         let parts: Vec<String> = report.dropped.iter().map(|(k, n)| format!("{n} {k}")).collect();

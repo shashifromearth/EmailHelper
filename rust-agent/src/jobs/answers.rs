@@ -89,6 +89,11 @@ const EEO: &[&str] = &[
     "latino",
 ];
 
+/// EEO / self-identification questions (gender, race, veteran, ...).
+pub fn is_self_identification(label: &str) -> bool {
+    label_has(&label.to_lowercase(), EEO)
+}
+
 /// Deterministic mapping from field label to profile data.
 pub fn from_profile(f: &Field, p: &Profile) -> Option<Answer> {
     let l = f.label.to_lowercase();
@@ -121,7 +126,7 @@ pub fn from_profile(f: &Field, p: &Profile) -> Option<Answer> {
     if label_has(&both, &["cover letter", "cover_letter", "coverletter"]) {
         return Some(Answer::CoverLetter);
     }
-    if label_has(&l, EEO) {
+    if is_self_identification(&l) {
         if let Some(o) = f.options.iter().find(|o| {
             let o = o.to_lowercase();
             o.contains("decline")
@@ -868,6 +873,8 @@ mod tests {
         );
         assert!(is_sensitive("Have you ever been convicted of a felony?"));
         assert!(!is_sensitive("Why do you want to join Acme?"));
+        assert!(is_self_identification("Are you Hispanic/Latino?"));
+        assert!(!is_self_identification("Why do you want to join Acme?"));
     }
 
     #[test]

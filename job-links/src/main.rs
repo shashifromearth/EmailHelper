@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         token: cfg.token.into(),
         default_lease: cfg.default_lease,
+        default_max_age_hours: cfg.max_age_hours,
         snapshot_path: Arc::new(cfg.snapshot_path.clone()),
     });
     let served = axum::serve(listener, app)

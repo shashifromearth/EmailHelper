@@ -4,6 +4,7 @@
 pub mod alerts;
 pub mod answers;
 pub mod application;
+pub mod assist;
 pub mod benchmark;
 pub mod browser;
 pub mod cover_letter;
@@ -11,6 +12,7 @@ pub mod detect;
 pub mod digest;
 pub mod employer;
 pub mod extract;
+pub mod feedback;
 pub mod linkqueue;
 pub mod matcher;
 

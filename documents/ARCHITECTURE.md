@@ -33,6 +33,7 @@ log JSON, and start together with `run.cmd`.
 | Email agent (`rust-agent`) | 7800 | Thunderbird intake, drafts, Telegram, research schedule, dashboard |
 | Knowledge service (`knowledge-service`) | 7820 | ETL, embeddings, hybrid search, resume choice, profile for form filling |
 | Job-links service (`job-links`) | 7810 | Shared job database: links from email and research; the applier works through it |
+| Chrome extension (`chrome-extension`) | – | Job applier: takes jobs from job-links, fills forms with the agent's answers and the chosen resume; the person submits |
 
 The people/profile/resume domain and the ETL live in the `knowledge-core`
 library (`eh_knowledge`), shared by the agent and the knowledge service.
@@ -51,6 +52,7 @@ drafting never stops.
 | Component | Tech | Location |
 |---|---|---|
 | Thunderbird extension | MailExtension (MV2, TB 115+) | `thunderbird-extension/` |
+| Chrome extension (job applier) | MV3, Chrome 116+ | `chrome-extension/` |
 | Orchestrator | Rust, tokio, axum, rusqlite, reqwest | `rust-agent/` |
 | Knowledge service | Rust, axum, SQLite + FTS5 + sqlite-vec | `knowledge-service/` |
 | Knowledge domain library | Rust | `knowledge-core/` |

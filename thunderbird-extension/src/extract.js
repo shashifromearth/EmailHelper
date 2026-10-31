@@ -5,6 +5,8 @@
 // Nothing in this module touches `messenger.*`, so it is unit tested in Node.
 
 export const MAX_BODY_TEXT_BYTES = 64 * 1024;
+/** HTML is sent (compacted) because some links exist only there, e.g. "Apply" buttons. */
+export const MAX_BODY_HTML_BYTES = 128 * 1024;
 export const MAX_SUBJECT_CHARS = 998;
 export const MAX_REFERENCES = 50;
 export const MAX_RECIPIENTS = 200;
@@ -478,6 +480,22 @@ export function normalizeAttachments(list) {
 // Payload
 // ---------------------------------------------------------------------------
 
+/**
+ * HTML without what never carries a link (head, styles, scripts, comments,
+ * inline styles, tracking images), so the anchors fit within the size limit.
+ */
+export function compactHtml(html) {
+  if (typeof html !== "string" || !html) return "";
+  return html
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<(head|style|script|noscript|template|svg)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<img\b[^>]*>/gi, "")
+    .replace(/\s(?:style|class|width|height|align|valign|bgcolor|border|cellpadding|cellspacing|role|dir|id)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/[ \t]*\r?\n[ \t\r\n]*/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 /** Truncate to at most `maxBytes` UTF-8 bytes without splitting a code point. */
 export function truncateUtf8(text, maxBytes = MAX_BODY_TEXT_BYTES) {
   if (typeof text !== "string") return "";
@@ -555,7 +573,7 @@ export function buildEmailPayload({ header, full, attachments = null, account, f
     subject,
     date: toIsoDate(h.date) || toIsoDate(getHeader(headers, "date")),
     body_text: truncateUtf8(body.text, MAX_BODY_TEXT_BYTES),
-    body_html: null,
+    body_html: truncateUtf8(compactHtml(body.html), MAX_BODY_HTML_BYTES) || null,
     attachments: atts,
   };
 }
@@ -575,6 +593,9 @@ export function validateEmailPayload(p) {
   else if (Array.from(p.subject).length > MAX_SUBJECT_CHARS) errors.push(`subject exceeds ${MAX_SUBJECT_CHARS} characters`);
   if (typeof p.body_text !== "string") errors.push("body_text must be a string");
   else if (new TextEncoder().encode(p.body_text).length > MAX_BODY_TEXT_BYTES) errors.push("body_text exceeds 64 KiB");
+  if (p.body_html != null && (typeof p.body_html !== "string" || new TextEncoder().encode(p.body_html).length > MAX_BODY_HTML_BYTES)) {
+    errors.push("body_html must be a string of at most 128 KiB");
+  }
   if (p.account_type !== undefined && p.account_type !== null && !ACCOUNT_TYPES.includes(p.account_type)) {
     errors.push(`account_type must be one of ${ACCOUNT_TYPES.join(", ")}`);
   }

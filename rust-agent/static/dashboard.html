@@ -49,6 +49,8 @@
 <main>
   <div class="tiles" id="tiles"></div>
   <p class="muted" id="kstatus"></p>
+  <p class="muted" id="lstatus"></p>
+  <p class="muted" id="astatus"></p>
   <section><h2>Waiting for you</h2><div class="scroll" id="questions"></div></section>
   <section><h2>Applications</h2><div class="scroll" id="apps"></div></section>
   <section id="unassigned-section" hidden><h2>Mailboxes not in people.json (classified only, no drafts)</h2><div class="scroll" id="unassigned"></div></section>
@@ -168,6 +170,30 @@
         (d.running ? "; indexing now…" : "") + (ix.last_etl ? "; last run " + new Date(ix.last_etl).toLocaleString() : "");
     } catch (e) { el.textContent = ""; }
   }
+  async function linksStatus() {
+    var el = document.getElementById("lstatus");
+    try {
+      var res = await fetch("/api/v1/job-links/status", { headers: { "X-EmailHelper-Token": getToken() } });
+      if (!res.ok) { el.textContent = ""; return; }
+      var d = await res.json(), parts = function (o) { return Object.keys(o || {}).filter(function (k) { return o[k]; }).map(function (k) { return k + " " + o[k]; }).join(", "); };
+      el.textContent = "Job database: " + d.total + " jobs (" + (parts(d.by_status) || "empty") + ")" + (d.total ? "; by site: " + parts(d.by_platform) : "");
+    } catch (e) { el.textContent = ""; }
+  }
+  // Chrome extension applier: what keeps failing, and where.
+  async function applierStatus() {
+    var el = document.getElementById("astatus");
+    try {
+      var res = await fetch("/api/v1/apply/events/summary?days=7", { headers: { "X-EmailHelper-Token": getToken() } });
+      if (!res.ok) { el.textContent = ""; return; }
+      var d = await res.json(), k = d.by_kind || {};
+      var kinds = Object.keys(k).filter(function (x) { return x !== "applied" && k[x]; }).map(function (x) { return x + " " + k[x]; });
+      var top = (d.top || []).slice(0, 3).map(function (t) {
+        var where = [t.platform, t.field].filter(Boolean).join(" · ");
+        return (where ? where + ": " : "") + t.reason + " (" + t.count + ")";
+      });
+      el.textContent = kinds.length ? "Applier problems (7 days): " + kinds.join(", ") + (top.length ? "; top: " + top.join("; ") : "") : "";
+    } catch (e) { el.textContent = ""; }
+  }
   document.getElementById("reindex").addEventListener("click", async function () {
     var err = document.getElementById("err");
     try {
@@ -178,7 +204,9 @@
     setTimeout(knowledgeStatus, 1500);
   });
   knowledgeStatus();
-  setInterval(knowledgeStatus, 60000);
+  linksStatus();
+  applierStatus();
+  setInterval(function () { knowledgeStatus(); linksStatus(); applierStatus(); }, 60000);
   load();
   setInterval(load, 60000);
 })();

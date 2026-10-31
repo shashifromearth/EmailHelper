@@ -1,7 +1,9 @@
 //! Remote-job boards with public APIs/feeds: Remotive, RemoteOK, Himalayas,
 //! Jobicy and We Work Remotely. Each gives a posting date and the countries
 //! applicants may be in, which the research filters need. They are read once
-//! a day with an identifying User-Agent; their pages link back to the source.
+//! a day with an identifying User-Agent, a general list plus worldwide
+//! searches for the tech stack (at most `MAX_REQUESTS_PER_BOARD` requests a
+//! board); their pages link back to the source.
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use serde_json::Value;
@@ -11,7 +13,7 @@ use crate::error::{AppError, AppResult};
 use crate::jobs::extract::{self, html_to_text};
 use crate::research::sources::RawJob;
 
-pub const USER_AGENT: &str = "EmailHelper-research/1.0 (personal job search; one request per board per day)";
+pub const USER_AGENT: &str = "EmailHelper-research/1.0 (personal job search; a few requests per board per day)";
 
 /// Board names accepted in RESEARCH_REMOTE_BOARDS.
 pub const BOARDS: &[&str] = &["remotive", "remoteok", "himalayas", "jobicy", "weworkremotely"];
@@ -231,46 +233,121 @@ pub fn parse_wwr(xml: &str) -> AppResult<Vec<RawJob>> {
     Ok(out)
 }
 
+/// Most requests made to one board in a run, its general lists included.
+pub const MAX_REQUESTS_PER_BOARD: usize = 9;
+
+/// The default RESEARCH_TECH_STACK.
+pub const DEFAULT_TECH_STACK: &[&str] = &["python", "c#", ".net", "java", "rust", "go", "genai", "agentic ai"];
+
 /// Default endpoint (overridable for tests via `RESEARCH_<BOARD>_URL`).
 pub fn default_url(board: &str) -> &'static str {
     default_urls(board)[0]
 }
 
-/// The requests made to a board each day: its general recent list plus
-/// searches for the person's stacks / India-open jobs where the board offers them.
-pub fn default_urls(board: &str) -> &'static [&'static str] {
+/// A board's general recent lists (no search), worldwide.
+fn general_urls(board: &str) -> &'static [&'static str] {
     match board {
-        "remotive" => &[
-            "https://remotive.com/api/remote-jobs?category=software-dev",
-            "https://remotive.com/api/remote-jobs?search=python",
-            "https://remotive.com/api/remote-jobs?search=java",
-            "https://remotive.com/api/remote-jobs?search=.net",
-            "https://remotive.com/api/remote-jobs?search=ai",
-        ],
-        "remoteok" => &[
-            "https://remoteok.com/api",
-            "https://remoteok.com/api?tags=python",
-            "https://remoteok.com/api?tags=java",
-            "https://remoteok.com/api?tags=ai",
-        ],
+        "remotive" => &["https://remotive.com/api/remote-jobs?category=software-dev"],
+        "remoteok" => &["https://remoteok.com/api"],
         "himalayas" => &[
             "https://himalayas.app/jobs/api?limit=20",
             "https://himalayas.app/jobs/api?limit=20&offset=20",
-            "https://himalayas.app/jobs/api/search?q=python&country=India",
-            "https://himalayas.app/jobs/api/search?q=java&country=India",
-            "https://himalayas.app/jobs/api/search?q=.net&country=India",
-            "https://himalayas.app/jobs/api/search?q=generative%20ai&country=India",
-            "https://himalayas.app/jobs/api/search?q=agentic&country=India",
         ],
-        "jobicy" => &[
-            "https://jobicy.com/api/v2/remote-jobs?count=100",
-            "https://jobicy.com/api/v2/remote-jobs?count=50&geo=apac",
-        ],
+        "jobicy" => &["https://jobicy.com/api/v2/remote-jobs?count=100"],
         _ => &[
             "https://weworkremotely.com/categories/remote-programming-jobs.rss",
             "https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss",
             "https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss",
         ],
+    }
+}
+
+/// The word a board is searched with for a stack term. C# and .NET share
+/// one search, as do GenAI and agentic AI on RemoteOK's tags.
+fn board_term(board: &str, term: &str) -> String {
+    let t = term.trim().to_lowercase();
+    match t.as_str() {
+        "c#" | "csharp" | ".net" | "dotnet" | "asp.net" if board == "remoteok" => "dotnet".into(),
+        "c#" | "csharp" | ".net" | "dotnet" | "asp.net" => ".net".into(),
+        "go" | "golang" => "golang".into(),
+        "genai" | "gen ai" | "generative ai" | "llm" if board == "himalayas" => "generative ai".into(),
+        "genai" | "gen ai" | "generative ai" | "llm" => "ai".into(),
+        "agentic ai" | "agentic" | "ai agents" if board == "remoteok" => "ai".into(),
+        "agentic ai" | "agentic" | "ai agents" => "agentic".into(),
+        _ => t,
+    }
+}
+
+/// The requests made to a board in a run: its general recent lists plus one
+/// worldwide search per term of the tech stack (RESEARCH_TECH_STACK), at most
+/// [`MAX_REQUESTS_PER_BOARD`]. We Work Remotely has no search: its feeds only.
+pub fn search_urls(board: &str, stack: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = general_urls(board).iter().map(|u| u.to_string()).collect();
+    let template = match board {
+        "remotive" => "https://remotive.com/api/remote-jobs?search=",
+        "remoteok" => "https://remoteok.com/api?tags=",
+        "himalayas" => "https://himalayas.app/jobs/api/search?q=",
+        "jobicy" => "https://jobicy.com/api/v2/remote-jobs?count=50&tag=",
+        _ => return out,
+    };
+    for term in stack {
+        let word = board_term(board, term);
+        if word.is_empty() {
+            continue;
+        }
+        let url = format!("{template}{}", url::form_urlencoded::byte_serialize(word.as_bytes()).collect::<String>());
+        if !out.contains(&url) {
+            out.push(url);
+        }
+    }
+    out.truncate(MAX_REQUESTS_PER_BOARD);
+    out
+}
+
+/// [`search_urls`] for the default tech stack ([`DEFAULT_TECH_STACK`]).
+pub fn default_urls(board: &str) -> &'static [&'static str] {
+    match board {
+        "remotive" => &[
+            "https://remotive.com/api/remote-jobs?category=software-dev",
+            "https://remotive.com/api/remote-jobs?search=python",
+            "https://remotive.com/api/remote-jobs?search=.net",
+            "https://remotive.com/api/remote-jobs?search=java",
+            "https://remotive.com/api/remote-jobs?search=rust",
+            "https://remotive.com/api/remote-jobs?search=golang",
+            "https://remotive.com/api/remote-jobs?search=ai",
+            "https://remotive.com/api/remote-jobs?search=agentic",
+        ],
+        "remoteok" => &[
+            "https://remoteok.com/api",
+            "https://remoteok.com/api?tags=python",
+            "https://remoteok.com/api?tags=dotnet",
+            "https://remoteok.com/api?tags=java",
+            "https://remoteok.com/api?tags=rust",
+            "https://remoteok.com/api?tags=golang",
+            "https://remoteok.com/api?tags=ai",
+        ],
+        "himalayas" => &[
+            "https://himalayas.app/jobs/api?limit=20",
+            "https://himalayas.app/jobs/api?limit=20&offset=20",
+            "https://himalayas.app/jobs/api/search?q=python",
+            "https://himalayas.app/jobs/api/search?q=.net",
+            "https://himalayas.app/jobs/api/search?q=java",
+            "https://himalayas.app/jobs/api/search?q=rust",
+            "https://himalayas.app/jobs/api/search?q=golang",
+            "https://himalayas.app/jobs/api/search?q=generative+ai",
+            "https://himalayas.app/jobs/api/search?q=agentic",
+        ],
+        "jobicy" => &[
+            "https://jobicy.com/api/v2/remote-jobs?count=100",
+            "https://jobicy.com/api/v2/remote-jobs?count=50&tag=python",
+            "https://jobicy.com/api/v2/remote-jobs?count=50&tag=.net",
+            "https://jobicy.com/api/v2/remote-jobs?count=50&tag=java",
+            "https://jobicy.com/api/v2/remote-jobs?count=50&tag=rust",
+            "https://jobicy.com/api/v2/remote-jobs?count=50&tag=golang",
+            "https://jobicy.com/api/v2/remote-jobs?count=50&tag=ai",
+            "https://jobicy.com/api/v2/remote-jobs?count=50&tag=agentic",
+        ],
+        _ => general_urls(board),
     }
 }
 
@@ -307,6 +384,37 @@ mod tests {
         assert_eq!(parse_date(&json!(want.timestamp())), Some(want));
         assert_eq!(parse_date(&json!("Sat, 17 Oct 2026 16:04:29 +0000")), Some(want));
         assert_eq!(parse_date(&json!("yesterday")), None);
+    }
+
+    fn stack(terms: &[&str]) -> Vec<String> {
+        terms.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn searches_follow_the_stack_worldwide() {
+        for b in BOARDS {
+            let want: Vec<String> = default_urls(b).iter().map(|u| u.to_string()).collect();
+            assert_eq!(search_urls(b, &stack(DEFAULT_TECH_STACK)), want, "default_urls({b}) matches the default stack");
+            assert!(want.len() <= MAX_REQUESTS_PER_BOARD, "{b}");
+            assert!(want.iter().all(|u| !u.contains("country=") && !u.contains("geo=")), "no regional limits: {b}");
+        }
+        for want in ["search=rust", "search=golang", "search=.net"] {
+            assert!(default_urls("remotive").iter().any(|u| u.ends_with(want)), "{want}");
+        }
+        let custom = search_urls("himalayas", &stack(&["Kotlin", "C#", ".NET", "machine learning"]));
+        assert_eq!(
+            custom[2..],
+            [
+                "https://himalayas.app/jobs/api/search?q=kotlin",
+                "https://himalayas.app/jobs/api/search?q=.net",
+                "https://himalayas.app/jobs/api/search?q=machine+learning",
+            ],
+            "C# and .NET share one search"
+        );
+        assert_eq!(search_urls("weworkremotely", &stack(&["rust"])).len(), 3, "feeds only");
+        assert_eq!(search_urls("remotive", &[]), ["https://remotive.com/api/remote-jobs?category=software-dev"]);
+        let many: Vec<String> = (0..30).map(|i| format!("term{i}")).collect();
+        assert_eq!(search_urls("jobicy", &many).len(), MAX_REQUESTS_PER_BOARD);
     }
 
     #[test]

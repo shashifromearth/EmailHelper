@@ -20,8 +20,14 @@ pub struct ContextBundle {
     pub thread_count: usize,
     pub knowledge_text: String,
     pub sources: Vec<String>,
-    /// All trusted text, used by the validator to detect invented facts.
+    /// Trusted text only (knowledge + the person's own details), used by the
+    /// validator to detect invented facts.
     pub grounding: String,
+    /// Third-party text (earlier thread messages + the incoming email). Never
+    /// grounds facts; the validator flags values the draft copies from it.
+    pub incoming: String,
+    /// Prompt-injection flags found in earlier thread messages.
+    pub injection_flags: Vec<String>,
 }
 
 // Kept small on purpose: on CPU-only machines reading the prompt is the
@@ -50,8 +56,15 @@ pub async fn retrieve(
     let e2 = e.clone();
     let related = app.db.call(move |c| emails::related(c, &e2, 4)).await?;
     let mut thread_text = String::new();
+    let mut injection_flags: Vec<String> = Vec::new();
     for r in &related {
-        let body = prompts::sanitize_untrusted(&r.body_text, 500).text;
+        let s = prompts::sanitize_untrusted(&r.body_text, 500);
+        for f in s.injection_flags {
+            if !injection_flags.contains(&f) {
+                injection_flags.push(f);
+            }
+        }
+        let body = s.text;
         thread_text.push_str(&format!(
             "--- {} | {} | {}\n{}\n",
             r.received_at.as_deref().unwrap_or(&r.created_at),
@@ -110,10 +123,18 @@ pub async fn retrieve(
     } else {
         profile.tone.chars().take(600).collect()
     };
-    let grounding = format!(
-        "{knowledge_text}\n{thread_text}\n{}\n{}",
-        e.subject, e.body_text
+    // The person's own contact details may appear in their reply.
+    let id = &profile.identity;
+    let mut mine = vec![profile.signature_for(&person.name)];
+    mine.extend(
+        [&id.email, &id.phone, &id.linkedin_url, &id.github_url, &id.portfolio_url]
+            .into_iter()
+            .filter(|v| !v.trim().is_empty())
+            .cloned(),
     );
+    mine.extend(person.mailboxes.iter().map(|m| m.address.clone()));
+    let grounding = format!("{knowledge_text}\n[my details]\n{}", mine.join("\n"));
+    let incoming = format!("{thread_text}\n{}\n{}", e.subject, e.body_text);
     Ok(ContextBundle {
         user_name: person.name.clone(),
         signature: profile.signature_for(&person.name),
@@ -123,6 +144,8 @@ pub async fn retrieve(
         knowledge_text: knowledge_text.trim().to_string(),
         sources,
         grounding,
+        incoming,
+        injection_flags,
     })
 }
 

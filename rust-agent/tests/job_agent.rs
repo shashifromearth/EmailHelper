@@ -822,3 +822,200 @@ View job: https://www.linkedin.com/comm/jobs/view/4479947091/?trackingId=def\n";
         .unwrap();
     assert!(apps.is_empty());
 }
+
+#[tokio::test]
+async fn extension_gets_form_answers_and_applies_nothing() {
+    let agent = builder().start().await;
+    let field = |id: &str, label: &str, kind: &str, required: bool| {
+        json!({"id": id, "label": label, "type": kind, "required": required, "options": []})
+    };
+    let body = json!({
+        "job": {"title": "Staff AI Engineer", "company": "Acme"},
+        "fields": [
+            field("email", "Email", "email", true),
+            field("resume", "Resume/CV", "file", true),
+            field("terms", "I agree to the Terms of Service and Privacy Policy", "checkbox", true),
+            field("cover", "Cover Letter", "textarea", false),
+        ]
+    });
+    // the Chrome extension's service worker sends its own origin
+    let r = agent
+        .http
+        .post(agent.url("/api/v1/apply/answers"))
+        .header("x-emailhelper-token", TOKEN)
+        .header("origin", "chrome-extension://abcdefghijklmnop")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    let answer = |id: &str| v["answers"].as_array().unwrap().iter().find(|a| a["id"] == id).cloned().unwrap();
+    assert_eq!(answer("email"), json!({"kind": "value", "id": "email", "value": "asha.rao@asharao.test"}));
+    assert_eq!(answer("resume")["kind"], "resume");
+    assert_eq!(answer("terms")["kind"], "ask", "legal agreements stay with the person");
+    assert_eq!(answer("cover")["kind"], "value");
+    assert!(answer("cover")["value"].as_str().is_some_and(|s| !s.is_empty()));
+
+    // What the person answers on a form is reused next time, except sensitive questions.
+    let r = agent
+        .post(
+            "/api/v1/apply/remember",
+            &json!({"answers": [
+                {"label": "Which conference talk inspired you most?", "value": "tokio-console"},
+                {"label": "What is your expected salary?", "value": "60 LPA"},
+                {"label": "What is your gender?", "value": "Female"}
+            ]}),
+        )
+        .await;
+    assert_eq!(r.json::<Value>().await.unwrap()["remembered"], 1);
+    let again: Value = agent
+        .post(
+            "/api/v1/apply/answers",
+            &json!({"fields": [field("oss", "Which conference talk inspired you most?", "text", true)]}),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again["answers"][0], json!({"kind": "value", "id": "oss", "value": "tokio-console"}));
+
+    let unknown = agent.post("/api/v1/apply/answers", &json!({"person": "nobody", "fields": []})).await;
+    assert_eq!(unknown.status(), 404);
+    let foreign = agent
+        .http
+        .post(agent.url("/api/v1/apply/answers"))
+        .header("x-emailhelper-token", TOKEN)
+        .header("origin", "https://evil.example")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), 401);
+}
+
+#[tokio::test]
+async fn extension_escalation_asks_on_telegram_once_and_learns_the_reply() {
+    let env = setup("review", json!([]), true).await;
+    let agent = &env.agent;
+    let body = json!({
+        "link_id": "l-1", "url": JOB_URL, "title": "Staff AI Engineer", "company": "Acme",
+        "platform": "greenhouse", "person": null, "kind": "captcha", "reason": "CAPTCHA on the form"
+    });
+    let first: Value = agent.post("/api/v1/apply/escalations", &body).await.json().await.unwrap();
+    assert_eq!(first["telegram"], true);
+    let id = first["id"].as_str().unwrap().to_string();
+    // Still open: the same escalation comes back and nobody is messaged twice.
+    let again: Value = agent.post("/api/v1/apply/escalations", &body).await.json().await.unwrap();
+    assert_eq!(again["id"], first["id"]);
+    let asks: Vec<String> = telegram_texts(&env.tg)
+        .await
+        .into_iter()
+        .filter(|t| t.contains("Job applier needs you"))
+        .collect();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert!(asks[0].contains("Staff AI Engineer — Acme") && asks[0].contains("Why: CAPTCHA on the form"), "{}", asks[0]);
+    assert!(asks[0].contains(JOB_URL));
+    let path = format!("/api/v1/apply/escalations/{id}");
+    assert_eq!(agent.get_json(&path).await["status"], "open");
+
+    // The person replies "/skip" to the message (id 4242 from the mock).
+    let tg_msg = |id: i64, text: Option<&str>, reply_to: Option<Message>| Message {
+        message_id: id,
+        chat: Chat { id: 777, ..Default::default() },
+        text: text.map(str::to_string),
+        reply_to_message: reply_to.map(Box::new),
+    };
+    let reply = tg_msg(5, Some("/skip"), Some(tg_msg(4242, None, None)));
+    let out = emailhelper::telegram::bot::handle_message(&agent.app, &reply).await.unwrap().unwrap();
+    assert_eq!(out, "Skipping it.");
+    let v = agent.get_json(&path).await;
+    assert_eq!((v["status"].as_str(), v["answer"].is_null()), (Some("skip"), true));
+
+    // The first resolution wins; the extension's resolve is a no-op now.
+    let r: Value = agent
+        .post(&format!("{path}/resolve"), &json!({"status": "done"}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["status"], "skip");
+    let bad = agent.post(&format!("{path}/resolve"), &json!({"status": "maybe"})).await;
+    assert_eq!(bad.status(), 422);
+    assert_eq!(agent.get("/api/v1/apply/escalations/nope").await.status(), 404);
+
+    // Closed, so the same page can escalate again; the extension resolves it.
+    let next: Value = agent.post("/api/v1/apply/escalations", &body).await.json().await.unwrap();
+    assert_ne!(next["id"], first["id"]);
+    let r: Value = agent
+        .post(&format!("/api/v1/apply/escalations/{}/resolve", next["id"].as_str().unwrap()), &json!({"status": "done"}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["status"], "done");
+}
+
+#[tokio::test]
+async fn extension_failures_are_stored_and_summarised() {
+    let agent = builder().start().await;
+    let fill = |url: &str| {
+        json!({"kind": "fill_failed", "url": url, "platform": "greenhouse", "field": "Phone", "reason": "no input found"})
+    };
+    let r = agent
+        .post(
+            "/api/v1/apply/events",
+            &json!({"events": [
+                fill("https://x.test/1"), fill("https://x.test/2"), fill("https://x.test/3"),
+                {"kind": "blocked", "url": "https://y.test/1", "platform": "lever", "reason": "captcha", "detail": "x".repeat(10_000)},
+                {"kind": "applied", "url": "https://y.test/2", "platform": "lever", "reason": "submitted"}
+            ]}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap()["stored"], 5);
+
+    let s = agent.get_json("/api/v1/apply/events/summary?days=7").await;
+    assert_eq!(s["days"], 7);
+    assert_eq!(s["by_kind"], json!({"applied": 1, "blocked": 1, "fill_failed": 3}));
+    let top = s["top"].as_array().unwrap();
+    assert_eq!(top.len(), 2, "applied is not a problem: {top:?}");
+    assert_eq!(
+        (&top[0]["platform"], &top[0]["kind"], &top[0]["field"], &top[0]["reason"], &top[0]["count"]),
+        (&json!("greenhouse"), &json!("fill_failed"), &json!("Phone"), &json!("no input found"), &json!(3))
+    );
+    assert!(top[0]["last_url"].as_str().is_some_and(|u| u.starts_with("https://x.test/")));
+    assert_eq!(top[1]["field"], Value::Null);
+    assert_eq!(metric_sum(&agent.metrics().await, "apply_events_total"), 5.0);
+
+    let too_many: Vec<Value> = (0..201).map(|i| fill(&format!("https://x.test/{i}"))).collect();
+    let r = agent.post("/api/v1/apply/events", &json!({ "events": too_many })).await;
+    assert_eq!(r.status(), 422);
+
+    // Without Telegram an escalation is still stored, just not messaged.
+    let r: Value = agent
+        .post("/api/v1/apply/escalations", &json!({"url": "https://y.test/1", "kind": "login_required", "reason": "sign-in wall"}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["telegram"], false);
+    assert!(r["id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn health_reports_optional_services_and_degrades_when_one_is_down() {
+    let off = builder().start().await;
+    let h: Value = off.http.get(off.url("/health")).send().await.unwrap().json().await.unwrap();
+    assert_eq!((h["status"].as_str(), h["checks"]["knowledge_service"].as_str(), h["checks"]["job_links"].as_str()), (Some("ok"), Some("off"), Some("off")));
+
+    let links = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/livez"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&links)
+        .await;
+    let down = builder().env("JOB_LINKS_ENABLED", "true").env("JOB_LINKS_URL", &links.uri()).start().await;
+    let h: Value = down.http.get(down.url("/health")).send().await.unwrap().json().await.unwrap();
+    assert_eq!((h["status"].as_str(), h["checks"]["job_links"].as_str()), (Some("degraded"), Some("down")), "{h}");
+}

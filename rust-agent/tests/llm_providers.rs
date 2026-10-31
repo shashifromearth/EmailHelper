@@ -63,6 +63,9 @@ async fn ollama_end_to_end_draft() {
         ("MODEL_MODE", "LOCAL".to_string()),
         ("OLLAMA_BASE_URL", ollama.uri()),
         ("OLLAMA_MODEL", "qwen2.5:7b".to_string()),
+        // the call count below is exact: no sampled judging, no real knowledge service
+        ("EVAL_LIVE_SAMPLE", "0".to_string()),
+        ("KNOWLEDGE_SERVICE_URL", "none".to_string()),
     ]);
     let cfg = Config::from_lookup(|k| env.get(k).cloned()).unwrap();
     let app = App::build(cfg, AppOverrides::default()).unwrap();

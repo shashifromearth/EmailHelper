@@ -31,6 +31,8 @@ pub struct AppState {
     pub store: Arc<Store>,
     pub token: Arc<str>,
     pub default_lease: Duration,
+    /// Max age for a claim that doesn't give `max_age_hours` (None = no limit).
+    pub default_max_age_hours: Option<u64>,
     /// Checked by `/readyz`.
     pub snapshot_path: Arc<PathBuf>,
 }
@@ -243,7 +245,10 @@ async fn claim(
     State(st): State<AppState>,
     body: Result<Json<ClaimRequest>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    let Json(req) = body?;
+    let Json(mut req) = body?;
+    if req.max_age_hours.is_none() {
+        req.max_age_hours = st.default_max_age_hours;
+    }
     let (links, lease_expires_at) = st.store.claim(req, st.default_lease, Utc::now())?;
     Ok(Json(json!({ "links": links, "lease_expires_at": lease_expires_at })))
 }

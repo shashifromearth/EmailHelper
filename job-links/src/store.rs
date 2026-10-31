@@ -26,6 +26,8 @@ const MAX_DESCRIPTION_BYTES: usize = 4096;
 const MAX_SKILLS: usize = 50;
 const MAX_SKILL_CHARS: usize = 100;
 const MAX_HISTORY: usize = 50;
+/// Upper bound for a claim's `max_age_hours` (10 years), so the cutoff never overflows.
+const MAX_AGE_HOURS: u64 = 10 * 365 * 24;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
@@ -154,14 +156,22 @@ fn set_status(l: &mut LinkRecord, status: Status, reason: Option<String>, now: D
     }
 }
 
+/// When the job appeared: its posting date, else when it was first seen.
+fn freshness(l: &LinkRecord) -> DateTime<Utc> {
+    l.posted_at.unwrap_or(l.discovered_at)
+}
+
+type ClaimKey = (Reverse<i16>, bool, Reverse<DateTime<Utc>>, usize);
+
 /// Claim order: higher score first (unscored last), then remote or
-/// contract-type work, then the oldest.
-fn priority(l: &LinkRecord, index: usize) -> (Reverse<i16>, bool, usize) {
+/// contract-type work, then the newest posting (first seen when undated),
+/// then discovery order.
+fn priority(l: &LinkRecord, index: usize) -> ClaimKey {
     let flexible = l.remote == Remote::Remote
         || l.employment_type
             .as_deref()
             .is_some_and(|k| ["contract", "freelance", "consultant", "consulting"].contains(&k));
-    (Reverse(l.score.map_or(-1, i16::from)), !flexible, index)
+    (Reverse(l.score.map_or(-1, i16::from)), !flexible, Reverse(freshness(l)), index)
 }
 
 impl Store {
@@ -419,7 +429,8 @@ impl Store {
     }
 
     /// Claim up to `limit` `new` links for `client`, highest priority first
-    /// (see [`priority`]).
+    /// (see [`priority`]). With `max_age_hours`, links posted (or first
+    /// seen) longer ago are skipped but kept.
     pub fn claim(
         &self,
         req: ClaimRequest,
@@ -436,13 +447,18 @@ impl Store {
             .unwrap_or(default_lease.as_secs())
             .clamp(MIN_LEASE_SECS, MAX_LEASE_SECS);
         let expires = now + chrono::Duration::seconds(lease as i64);
+        let oldest = req
+            .max_age_hours
+            .filter(|h| *h > 0)
+            .map(|h| now - chrono::Duration::hours(h.min(MAX_AGE_HOURS) as i64));
         let mut st = self.write(now);
-        let mut candidates: Vec<(Reverse<i16>, bool, usize)> = st
+        let mut candidates: Vec<ClaimKey> = st
             .links
             .values()
             .enumerate()
             .filter(|(_, l)| {
                 l.status == Status::New
+                    && oldest.is_none_or(|t| freshness(l) >= t)
                     && req.platforms.as_ref().is_none_or(|ps| ps.contains(&l.platform))
                     && req
                         .person
@@ -453,7 +469,7 @@ impl Store {
             .collect();
         candidates.sort_unstable();
         let mut out = Vec::new();
-        for (_, _, i) in candidates.into_iter().take(limit) {
+        for (_, _, _, i) in candidates.into_iter().take(limit) {
             let (_, l) = st.links.get_index_mut(i).expect("index from enumerate");
             set_status(l, Status::Claimed, Some(format!("claimed by {client}")), now);
             l.claimed_by = Some(client.clone());
@@ -783,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn claim_order_is_score_then_flexible_then_oldest() {
+    fn claim_order_is_score_then_flexible() {
         let s = Store::new();
         let now = Utc::now();
         let add = |n: u32, score: Option<u8>, remote: Remote, kind: Option<&str>| {
@@ -807,6 +823,58 @@ mod tests {
         let order: Vec<&str> = got.iter().map(|l| l.url.rsplit('/').next().unwrap()).collect();
         assert_eq!(order, ["3", "2", "4", "1", "0"]);
         assert_eq!(got[1].employment_type.as_deref(), Some("contract"));
+    }
+
+    #[test]
+    fn ties_go_to_the_newest_posting() {
+        let s = Store::new();
+        let t0 = Utc::now();
+        let add = |n: u32, score: u8, posted: Option<DateTime<Utc>>, seen: DateTime<Utc>| {
+            s.upsert(
+                NewLink {
+                    score: Some(score),
+                    posted_at: posted,
+                    ..link(&format!("https://jobs.lever.co/acme/{n}"), None)
+                },
+                seen,
+            )
+            .unwrap();
+        };
+        add(0, 70, Some(t0 - chrono::Duration::hours(48)), t0);
+        add(1, 70, Some(t0 - chrono::Duration::hours(1)), t0);
+        // undated: first seen counts, and it was seen after 1 was posted
+        add(2, 70, None, t0 + chrono::Duration::seconds(10));
+        add(3, 90, Some(t0 - chrono::Duration::hours(100)), t0);
+        let (got, _) = s.claim(claim("x", 10), LEASE, t0 + chrono::Duration::seconds(20)).unwrap();
+        let order: Vec<&str> = got.iter().map(|l| l.url.rsplit('/').next().unwrap()).collect();
+        assert_eq!(order, ["3", "2", "1", "0"], "score first, then newest");
+    }
+
+    #[test]
+    fn max_age_skips_old_links_without_deleting_them() {
+        let s = Store::new();
+        let now = Utc::now();
+        let old = now - chrono::Duration::days(20);
+        s.upsert(NewLink { posted_at: Some(old), ..link("https://jobs.lever.co/acme/posted-long-ago", None) }, now)
+            .unwrap();
+        s.upsert(link("https://jobs.lever.co/acme/seen-long-ago", None), old).unwrap();
+        s.upsert(
+            NewLink {
+                posted_at: Some(now - chrono::Duration::hours(2)),
+                ..link("https://jobs.lever.co/acme/fresh", None)
+            },
+            old,
+        )
+        .unwrap();
+        let req = |h: Option<u64>| ClaimRequest { max_age_hours: h, ..claim("x", 10) };
+        let (got, _) = s.claim(req(Some(336)), LEASE, now).unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(got[0].url.ends_with("/fresh"), "a recent posting date wins over an old first-seen time");
+        assert_eq!(s.len(), 3, "old links are kept");
+        assert_eq!(s.stats(now).by_status["new"], 2);
+        // 0 (or no limit at all) claims them too
+        let (got, _) = s.claim(req(Some(0)), LEASE, now).unwrap();
+        assert_eq!(got.len(), 2);
     }
 
     #[test]

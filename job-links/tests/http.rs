@@ -21,6 +21,7 @@ fn app_with_snapshot(snapshot: PathBuf) -> (Router, Arc<Store>) {
         store: store.clone(),
         token: TOKEN.into(),
         default_lease: Duration::from_secs(600),
+        default_max_age_hours: Some(336),
         snapshot_path: Arc::new(snapshot),
     });
     (r, store)
@@ -245,6 +246,28 @@ async fn claim_result_lifecycle() {
     assert_eq!(v["by_status"]["applied"], 1);
     assert_eq!(v["by_status"]["claimed"], 1);
     assert_eq!(v["by_platform"]["lever"], 2);
+}
+
+#[tokio::test]
+async fn claims_skip_stale_links_and_prefer_new_ones() {
+    let (app, store) = app();
+    call(
+        &app,
+        Method::POST,
+        "/v1/links",
+        Some(json!([
+            { "url": "https://jobs.lever.co/acme/stale", "posted_at": "2020-01-01T00:00:00Z" },
+            { "url": "https://jobs.lever.co/acme/older", "posted_at": (chrono::Utc::now() - chrono::Duration::days(3)).to_rfc3339() },
+            { "url": "https://jobs.lever.co/acme/newer", "posted_at": (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339() }
+        ])),
+    )
+    .await;
+    let (_, v) = call(&app, Method::POST, "/v1/links/claim", Some(json!({ "client": "ext", "limit": 5 }))).await;
+    let urls: Vec<&str> = v["links"].as_array().unwrap().iter().map(|l| l["url"].as_str().unwrap()).collect();
+    assert_eq!(urls, ["https://jobs.lever.co/acme/newer", "https://jobs.lever.co/acme/older"], "default max age, newest first");
+    assert_eq!(store.len(), 3, "the stale link is kept");
+    let (_, v) = call(&app, Method::POST, "/v1/links/claim", Some(json!({ "client": "ext", "max_age_hours": 0 }))).await;
+    assert_eq!(v["links"][0]["url"], "https://jobs.lever.co/acme/stale", "0 lifts the limit");
 }
 
 #[tokio::test]

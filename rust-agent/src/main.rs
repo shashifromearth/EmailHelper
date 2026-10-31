@@ -240,7 +240,7 @@ Report: {}",
                                 }
                             };
                             if let Some(n) = n {
-                                items.truncate(n);
+                                items = emailhelper::eval::sample(items, n);
                             }
                             match emailhelper::eval::run(&app, &items).await {
                                 Ok((rep, out)) => {

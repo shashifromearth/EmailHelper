@@ -166,12 +166,30 @@ impl LinkQueueClient {
         )))
     }
 
+    /// Counts by status and platform (`GET /v1/stats`).
+    pub async fn stats(&self) -> AppResult<serde_json::Value> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/stats", self.base))
+            .header(TOKEN_HEADER, &self.token)
+            .timeout(TIMEOUT)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
     /// Add jobs, or fill gaps in ones already stored (same URL and person).
     pub async fn upsert(&self, links: &[QueuedLink]) -> AppResult<UpsertSummary> {
-        if links.is_empty() {
-            return Ok(UpsertSummary::default());
+        let mut total = UpsertSummary::default();
+        // the service takes at most 500 links per request
+        for batch in links.chunks(500) {
+            let s: UpsertSummary = self.post("/v1/links", json!({ "links": batch })).await?.json().await?;
+            total.created += s.created;
+            total.updated += s.updated;
+            total.failed += s.failed;
         }
-        Ok(self.post("/v1/links", json!({ "links": links })).await?.json().await?)
+        Ok(total)
     }
 
     /// Claim up to `limit` jobs for `client`, highest priority first.

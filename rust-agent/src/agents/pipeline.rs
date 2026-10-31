@@ -198,13 +198,23 @@ answer EVERY questionnaire item.\n",
     let (draft_body, added) = plan.ensure_answered(&draft.body);
     let grounding = format!("FACTS (trusted):\n{}\n\n{}", plan.grounding(), ctx.grounding);
     let masked = plan.mask_tokens(&draft_body);
+    // A poisoned earlier thread message counts as injection too.
+    let mut injection_flags = cls.injection_flags.clone();
+    for f in &ctx.injection_flags {
+        let f = format!("thread:{f}");
+        if !injection_flags.contains(&f) {
+            injection_flags.push(f);
+        }
+    }
     let v = validator::validate(
         &app.llm,
         &validator::ValidationInput {
             draft: &masked,
             grounding: &grounding,
+            incoming: &ctx.incoming,
+            sender: &e.from_email,
             classification_confidence: cls.confidence,
-            injection_flags: &cls.injection_flags,
+            injection_flags: &injection_flags,
         },
         app.cfg.llm_review_enabled(),
     )
@@ -212,6 +222,24 @@ answer EVERY questionnaire item.\n",
     let (body, private_used) = plan.fill_tokens(&draft_body);
     let mut verdict = v.verdict;
     let mut notes = v.notes.clone();
+    // Final PII scan of what will actually be sent. Approved private facts
+    // (filled from placeholders) are handled below; anything else is not.
+    let approved: Vec<&str> = plan
+        .answers
+        .iter()
+        .filter_map(|(_, a)| match a {
+            facts::FactAnswer::Token { value, .. } => Some(value.as_str()),
+            _ => None,
+        })
+        .collect();
+    let pii = validator::pii_kinds(&body, &approved);
+    if !pii.is_empty() {
+        verdict = validator::Verdict::ReviewRequired;
+        notes.push(format!(
+            "Contains a possible {} that is not an approved private fact; check before sending",
+            pii.join(", ")
+        ));
+    }
     if !added.is_empty() {
         notes.push(format!("Added answers the model left out: {}", added.join(", ")));
     }

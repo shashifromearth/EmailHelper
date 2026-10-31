@@ -532,3 +532,57 @@ async fn job_and_search_apis_keep_india_and_sponsored_jobs_remote_contract_first
     let li = report.kept.iter().find(|k| k.source == "brave:linkedin").unwrap();
     assert_eq!(li.url.as_deref(), Some("https://www.linkedin.com/jobs/view/4099999999/"));
 }
+
+#[tokio::test]
+async fn research_jobs_go_to_the_shared_job_database() {
+    let src = MockServer::start().await;
+    let links = MockServer::start().await;
+    let tg = telegram_mock().await;
+    let fresh = (chrono::Utc::now() - chrono::Duration::hours(3)).format("%Y-%m-%dT%H:%M:%S").to_string();
+    Mock::given(method("GET"))
+        .and(path("/remotive"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jobs": [
+            {"id": 1, "title": "Senior Python Engineer (GenAI)", "company_name": "Askable", "candidate_required_location": "Worldwide",
+             "publication_date": fresh, "job_type": "contract", "url": "https://remotive.com/remote-jobs/1?utm_source=feed",
+             "description": "Python, LLMs, RAG, Rust", "tags": ["python"]}
+        ]})))
+        .mount(&src)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/links"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"created": 1, "updated": 0, "failed": 0})))
+        .mount(&links)
+        .await;
+    let a = builder()
+        .env("RESEARCH_ENABLED", "true")
+        .env("RESEARCH_REMOTE_BOARDS", "remotive")
+        .env("RESEARCH_REMOTIVE_URL", &format!("{}/remotive", src.uri()))
+        .env("RESEARCH_APPLICANT_COUNTRY", "India")
+        .env("JOB_LINKS_ENABLED", "true")
+        .env("JOB_LINKS_URL", &links.uri())
+        .env("JOB_LINKS_TOKEN", "links-token-0123456789")
+        .env("TELEGRAM_ENABLED", "true")
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "1")
+        .env("TELEGRAM_API_BASE", &tg.uri())
+        .start()
+        .await;
+    a.post("/api/v1/research/run", &json!({})).await;
+    let summary = wait_for("discovery summary", T, || async {
+        sent_texts(&tg).await.into_iter().find(|t| t.contains("Daily Job Discovery"))
+    })
+    .await;
+    assert!(summary.contains("Queued for the Chrome extension: 1"), "{summary}");
+    let reqs = links.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].headers.get("x-joblinks-token").unwrap(), "links-token-0123456789");
+    let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    let job = &body["links"][0];
+    assert_eq!(job["source"], "research");
+    assert_eq!(job["source_detail"], "remotive");
+    assert_eq!(job["url"], "https://remotive.com/remote-jobs/1", "tracking parameters are dropped");
+    assert_eq!(job["employment_type"], "contract");
+    assert!(job["posted_at"].is_string(), "freshness travels with the job");
+    assert!(job["score"].is_number());
+    assert_ne!(job["decision"], "skip");
+}

@@ -40,8 +40,8 @@ cloud API keys never cause a failure: the agent falls back to local Ollama.
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Also `qwen2.5:3b` (low RAM), `llama3` or `mistral`. |
 | `OLLAMA_NUM_CTX` | `8192` | Context window requested from Ollama. Ollama's own default of 4096 tokens can silently cut off long draft prompts. |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` | — / `gpt-4o-mini` / `https://api.openai.com/v1` | Works with any OpenAI-compatible endpoint. |
-| `GEMINI_API_KEY` / `GEMINI_MODEL` | — / `gemini-flash-latest` | The key is sent in a header, never in the URL. |
-| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | — / `claude-haiku-5-5` | Messages API. |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` / `GEMINI_BASE_URL` | — / `gemini-flash-latest` / `https://generativelanguage.googleapis.com/v1beta` | The key is sent in a header, never in the URL. The knowledge service uses the same key and base URL for embeddings. |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `ANTHROPIC_BASE_URL` | — / `claude-haiku-5-5` / `https://api.anthropic.com/v1` | Messages API. |
 | `GROQ_API_KEY` / `GROQ_MODEL` / `GROQ_BASE_URL` | — / `openai/gpt-oss-20b` / `https://api.groq.com/openai/v1` | Groq's OpenAI-compatible API. Reasoning models (gpt-oss, o-series, qwen3) are asked for low reasoning effort and given extra token headroom. |
 | `LLM_TIMEOUT_SECS` | `90` | Timeout per request. |
 | `LLM_FALLBACK_TO_LOCAL` | `true` | Retries a failed remote request on Ollama. |
@@ -83,10 +83,27 @@ disabled with a warning.
 | `BROWSER_WORKER_TOKEN` | — | Shared secret (`X-Worker-Token`); must match the worker's value. |
 | `BROWSER_WORKER_TIMEOUT_SECS` | `180` | Timeout per worker call. |
 
-Browser worker settings (read by `browser-worker/`): `BROWSER_WORKER_HOST`,
-`BROWSER_WORKER_PORT`, `BROWSER_PROFILE_DIR`, `BROWSER_HEADLESS`,
-`BROWSER_SCREENSHOT_DIR`, `BROWSER_NAV_TIMEOUT_MS`,
-`BROWSER_ALLOWED_UPLOAD_DIRS`. See `browser-worker/README.md`.
+Browser worker settings (read by `browser-worker/`, which also needs
+`BROWSER_WORKER_TOKEN`; see `browser-worker/README.md`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `BROWSER_WORKER_HOST` | `127.0.0.1` | Listen address; non-loopback is refused unless `BROWSER_ALLOW_REMOTE=true`. |
+| `BROWSER_WORKER_PORT` | `7801` | Listen port. |
+| `BROWSER_ALLOW_REMOTE` | `false` | Allows a non-loopback host; only on an isolated internal network (Docker sets it). |
+| `BROWSER_PROFILE_DIR` | `./data/browser-profile` | Persistent browser profile (your logged-in sessions). |
+| `BROWSER_HEADLESS` | `true` | `false` shows the browser window. |
+| `BROWSER_CHANNEL` | *(bundled Chromium)* | Use an installed browser: `msedge` or `chrome`. |
+| `BROWSER_SCREENSHOT_DIR` | `./data/screenshots` | Where step screenshots are saved. |
+| `BROWSER_ALLOWED_UPLOAD_DIRS` | `./knowledge;./data` | Only files under these directories may be uploaded. |
+| `BROWSER_NAV_TIMEOUT_MS` | `30000` | Page navigation timeout. |
+| `BROWSER_MAX_PAGES` | `3` | Concurrent browser operations and open pages; further requests queue. |
+| `BROWSER_IDLE_TIMEOUT_MS` | `600000` | Idle session pages are closed after this long. |
+| `BROWSER_NETWORK_IDLE_CAP_MS` | `3000` | Upper limit on the "network idle" wait after navigation. |
+| `BROWSER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent`. |
+| `LINKEDIN_MIN_INTERVAL_MS` | `20000` | Minimum time between LinkedIn navigations (lower values are raised to 20000). |
+| `LINKEDIN_MAX_SEARCHES_PER_REQUEST` | `3` | LinkedIn people searches per request (one per role). |
+| `LINKEDIN_BASE_URL` | `https://www.linkedin.com` | Test-only override (mock server). |
 
 ## Job-link queue
 
@@ -96,7 +113,10 @@ Chrome extension applies from (in your own browser). With
 to the service, with the person, mailbox, email id, what the alert says about
 the job, a matcher score/decision from that and the resume to use, **instead
 of** opening pages and applying through the browser worker. Job emails are
-still only handled when `JOB_AGENT_ENABLED=true`.
+still only handled when `JOB_AGENT_ENABLED=true`. The research agent also
+puts every job it keeps (not skipped by the matcher) there, with
+`source=research`, the board or API name, when it was posted, the score and
+the resume to use; its daily summary counts them.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -112,6 +132,7 @@ Read only by the service (`job-links/README.md` has the API):
 | `JOB_LINKS_SNAPSHOT` | `data/job-links.json` | JSON snapshot loaded at start-up and rewritten atomically when links change. |
 | `JOB_LINKS_SNAPSHOT_SECS` | `5` | How often a changed store is written (and once more on shutdown). |
 | `JOB_LINKS_LEASE_SECS` | `900` | How long a claimed link stays claimed without a result before it goes back to `new`. |
+| `JOB_LINKS_MAX_AGE_HOURS` | `336` (14 days) | Claims skip `new` links posted longer ago than this (undated links: first seen); they stay in the store and in listings. `0` = no limit. A claim's `max_age_hours` overrides it. Links with the same score and work type (remote / contract) are claimed newest first. |
 
 ## Research agent
 
@@ -128,8 +149,8 @@ Read only by the service (`job-links/README.md` has the API):
 | `RESEARCH_CAREER_PAGES` | — | Career page URLs, opened through the browser worker. |
 | `RESEARCH_MAX_RESULTS_PER_QUERY` | `20` | Maximum SearXNG results per query. |
 | `RESEARCH_SUMMARY_TOP_N` | `10` | Number of jobs in the Telegram summary. |
-| `RESEARCH_REMOTE_BOARDS` | `remotive;remoteok;himalayas;jobicy;weworkremotely` | Remote-job boards read once a day through their public APIs/feeds (`none` turns them off). `RESEARCH_<BOARD>_URL` overrides an endpoint. |
-| `RESEARCH_MAX_AGE_HOURS` | `25` | Only postings published within this many hours are kept; postings without a date are dropped. `0` keeps everything. |
+| `RESEARCH_REMOTE_BOARDS` | `remotive;remoteok;himalayas;jobicy;weworkremotely` | Remote-job boards read once a day through their public APIs/feeds (`none` turns them off): each board's recent list plus one worldwide search per `RESEARCH_TECH_STACK` term (C#/.NET share one), at most 9 requests per board. We Work Remotely has no search and is read from its programming feeds. `RESEARCH_<BOARD>_URL` replaces a board's requests with one endpoint (tests). |
+| `RESEARCH_MAX_AGE_HOURS` | `25` | Only postings published within this many hours are kept. Postings without a date (SearXNG hits, career pages) are exempt and judged on the other rules; the job store dedupes by URL, so an undated job is new only the first time it is seen. `0` keeps everything. |
 | `RESEARCH_APPLICANT_COUNTRY` | first authorized country in the research person's profile | Remote jobs must be open to applicants in this country ("Worldwide", "APAC", "India"); jobs limited to other regions, or whose description says "US only", "must be located in the US", "EU only", "US citizens" and similar, are dropped. On-site / hybrid jobs are kept when they are in this country, or abroad when the description offers visa sponsorship, relocation help or welcomes international applicants (and doesn't say "no sponsorship"). |
 | `RESEARCH_REQUIRE_REMOTE` | `false` | `true`: a kept job must be remote (or a distributed team). `false`: on-site / hybrid jobs are kept too, under the rule above. |
 | `RESEARCH_WORK_TYPES` | `none` | Hard filter: a kept job must be one of these role types (e.g. `contract;freelance;consultant`), judged from the board's employment type, the title/tags and clear phrases such as "contract role" or "independent consultant". `none` = any role type. |
@@ -149,7 +170,7 @@ use `RESEARCH_SOURCES=none` or mock servers; no test calls a real API.
 | Variable | Default | Description |
 |---|---|---|
 | `RESEARCH_SOURCES` | `adzuna;jooble;careerjet;arbeitnow;themuse;google_cse;brave` | Sources to read (`none` = off). |
-| `RESEARCH_API_QUERIES` | 13 role + stack keywords (`python developer`, `.net developer`, `golang developer`, `genai architect`, `engineering manager`…) | Keywords for Adzuna, Jooble and Careerjet. |
+| `RESEARCH_API_QUERIES` | 21 role + stack keywords (`python developer`, `.net architect`, `golang developer`, `genai architect`, `tech lead`, `staff engineer`, `principal engineer`, `engineering director`, `ai engineering manager`, `freelance developer`, `contract developer`…; full list in `.env.example`) | Keywords for Adzuna, Jooble and Careerjet. One request per keyword and country/location; the list rotates daily within the budget. |
 | `RESEARCH_API_MAX_REQUESTS` | `250` | Requests per run across all API sources. |
 | `RESEARCH_API_MAX_REQUESTS_PER_SOURCE` | `40` | Requests per run for one source. |
 | `RESEARCH_API_DELAY_MS` | each API's own (Adzuna 2500, Brave 1100, The Muse/Google 500, others 1000) | Pause between two requests to one API. |
@@ -169,8 +190,9 @@ use `RESEARCH_SOURCES=none` or mock servers; no test calls a real API.
 | `GOOGLE_CSE_API_BASE` | `https://www.googleapis.com/customsearch/v1` | Endpoint override. |
 | `BRAVE_SEARCH_KEY` | — | Brave Search API subscription token ([api-dashboard.search.brave.com](https://api-dashboard.search.brave.com)). |
 | `BRAVE_SEARCH_API_BASE` | `https://api.search.brave.com/res/v1/web/search` | Endpoint override. |
-| `RESEARCH_SEARCH_ROLES` | `developer;senior engineer;architect;lead;engineering manager` | Search-API queries are `site:<site> "<role>" <stack>`; Google and Brave each take a different daily window of them. |
-| `RESEARCH_SEARCH_STACKS` | `python;.net;java;golang;rust;generative ai;agentic ai` | |
+| `RESEARCH_SEARCH_ROLES` | `developer\|software engineer;senior engineer\|staff engineer\|principal engineer;tech lead\|lead developer\|lead engineer;architect;engineering manager\|engineering director\|head of engineering;contract\|freelance` | Search-API queries are `site:<site> "<role>" <stack>`; Google and Brave each take a different daily window of them. `a\|b` in one entry becomes `("a" OR "b")`, so several roles share one query (6 roles × 6 stacks × 14 sites by default). |
+| `RESEARCH_SEARCH_STACKS` | `python;c#\|.net;java;golang;rust;generative ai\|agentic ai` | Stack words, same `\|` syntax. |
+| `GREENHOUSE_API_BASE` / `LEVER_API_BASE` / `ASHBY_API_BASE` | `https://boards-api.greenhouse.io/v1/boards` / `https://api.lever.co/v0/postings` / `https://api.ashbyhq.com/posting-api/job-board` | Endpoint overrides (tests). |
 | `RESEARCH_SEARCH_SITES` | `linkedin;glassdoor;naukri;wellfound;indeed;instahyre;hirist;foundit;iimjobs;upwork;freelancer;arc;dice;remoteco` | Only results that are job postings on these sites are kept. The sites themselves are never fetched; their postings are listed in the Telegram summary with the link, to apply with the browser extension (the agent never applies to them). |
 | `RESEARCH_AUTO_APPLY` | `false` | Start applications for discovered jobs that aren't skipped (needs `JOB_AGENT_ENABLED`). Jobs from your own mail are handled by the job agent regardless. |
 | `RECRUITER_DISCOVERY_ENABLED` | `false` | Finds recruiters for recruiting or job emails. |
@@ -187,10 +209,11 @@ People, mailboxes, purposes, private facts and resumes are described in
 | Variable | Default | Description |
 |---|---|---|
 | `KNOWLEDGE_SERVICE_ADDR` | `127.0.0.1:7820` | Where the knowledge service listens (loopback only unless `KNOWLEDGE_SERVICE_ALLOW_REMOTE=true`). |
+| `KNOWLEDGE_SERVICE_ALLOW_REMOTE` | `false` | `true` allows a non-loopback `KNOWLEDGE_SERVICE_ADDR`; only inside an isolated container network. |
 | `KNOWLEDGE_SERVICE_URL` | `http://127.0.0.1:7820` | Where the agent finds it; `none` = local keyword search only. |
 | `KNOWLEDGE_SERVICE_TOKEN` | `EH_API_TOKEN` | Shared token, sent as `x-knowledge-token`. |
-| `KNOWLEDGE_DB` | `data/knowledge.db` | Chunks, keyword index and vectors. |
-| `RAG_GEMINI_ENABLED` / `RAG_GEMINI_MODEL` | `true` / `gemini-embedding-001` | Gemini embeddings (needs `GEMINI_API_KEY`). |
+| `KNOWLEDGE_DB` | `$EH_DATA_DIR/knowledge.db` | Chunks, keyword index and vectors. |
+| `RAG_GEMINI_ENABLED` / `RAG_GEMINI_MODEL` | `true` / `gemini-embedding-001` | Gemini embeddings (needs `GEMINI_API_KEY`; uses `GEMINI_BASE_URL`). `false` = local Ollama embeddings only. |
 | `RAG_LOCAL_MODEL` | `nomic-embed-text` | Local Ollama embedding model (`ollama pull nomic-embed-text`). |
 | `RAG_ETL_CHECK_HOURS` | `6` | The ETL runs once a day; this is how often it checks whether today's run happened. |
 

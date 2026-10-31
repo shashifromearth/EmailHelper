@@ -284,12 +284,14 @@ pub const DEFAULT_SEARCH_TERMS: &[&str] = &[
     "GenAI Architect",
 ];
 
-/// Keywords the job APIs (Adzuna, Jooble, Careerjet) are queried with.
+/// Keywords the job APIs (Adzuna, Jooble, Careerjet) are queried with: each
+/// is one request per country/location, rotated daily within the budget.
 pub const DEFAULT_API_QUERIES: &[&str] = &[
     "python developer",
     "python architect",
     ".net developer",
     "c# developer",
+    ".net architect",
     "java developer",
     "java architect",
     "golang developer",
@@ -298,8 +300,28 @@ pub const DEFAULT_API_QUERIES: &[&str] = &[
     "agentic ai",
     "genai architect",
     "solution architect",
+    "tech lead",
+    "staff engineer",
+    "principal engineer",
     "engineering manager",
+    "ai engineering manager",
+    "engineering director",
+    "freelance developer",
+    "contract developer",
 ];
+
+/// Search-API role phrases; `a|b` share one query (`("a" OR "b")`).
+pub const DEFAULT_SEARCH_ROLES: &[&str] = &[
+    "developer|software engineer",
+    "senior engineer|staff engineer|principal engineer",
+    "tech lead|lead developer|lead engineer",
+    "architect",
+    "engineering manager|engineering director|head of engineering",
+    "contract|freelance",
+];
+
+/// Search-API stack words, combined with every role and site.
+pub const DEFAULT_SEARCH_STACKS: &[&str] = &["python", "c#|.net", "java", "golang", "rust", "generative ai|agentic ai"];
 
 impl Config {
     /// Load from the process environment.
@@ -488,7 +510,7 @@ impl Config {
             applicant_country: s("RESEARCH_APPLICANT_COUNTRY"),
             tech_stack: list_or_default(
                 s("RESEARCH_TECH_STACK"),
-                &["python", "c#", ".net", "java", "rust", "go", "genai", "agentic ai"],
+                crate::research::remote_boards::DEFAULT_TECH_STACK,
             ),
             work_types: list_or_default(s("RESEARCH_WORK_TYPES"), &[]),
             require_remote: b("RESEARCH_REQUIRE_REMOTE", false),
@@ -502,14 +524,8 @@ impl Config {
             apis: ApiSourcesConfig {
                 sources: list_or_default(s("RESEARCH_SOURCES"), crate::research::job_apis::SOURCES),
                 queries: list_or_default(s("RESEARCH_API_QUERIES"), DEFAULT_API_QUERIES),
-                search_roles: list_or_default(
-                    s("RESEARCH_SEARCH_ROLES"),
-                    &["developer", "senior engineer", "architect", "lead", "engineering manager"],
-                ),
-                search_stacks: list_or_default(
-                    s("RESEARCH_SEARCH_STACKS"),
-                    &["python", ".net", "java", "golang", "rust", "generative ai", "agentic ai"],
-                ),
+                search_roles: list_or_default(s("RESEARCH_SEARCH_ROLES"), DEFAULT_SEARCH_ROLES),
+                search_stacks: list_or_default(s("RESEARCH_SEARCH_STACKS"), DEFAULT_SEARCH_STACKS),
                 search_sites: list_or_default(
                     s("RESEARCH_SEARCH_SITES"),
                     crate::research::search_apis::SITES,
@@ -661,6 +677,10 @@ mod tests {
         assert!(!c.research.auto_apply);
         assert_eq!(c.max_concurrency, 10);
         assert_eq!(c.research.search_terms.len(), DEFAULT_SEARCH_TERMS.len());
+        for q in ["tech lead", "principal engineer", "engineering director", "freelance developer", "contract developer"] {
+            assert!(c.research.apis.queries.iter().any(|x| x == q), "{q}");
+        }
+        assert_eq!(c.research.tech_stack.len(), 8);
         assert!(!c.telegram_active());
     }
 

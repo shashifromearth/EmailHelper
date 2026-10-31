@@ -628,7 +628,7 @@ fn choose_resume(app: &App, person: &Person, job: &JobRecord) -> ResumeChoice {
 }
 
 /// Namespace for remembered form answers ("" in legacy single-person mode).
-fn memory_ns(person: &Person) -> String {
+pub(crate) fn memory_ns(person: &Person) -> String {
     if person.rel_dir.is_empty() {
         String::new()
     } else {

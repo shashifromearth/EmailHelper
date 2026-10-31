@@ -121,6 +121,32 @@ describe("buildEmailPayload", () => {
     const p = buildEmailPayload({ header, full, account: { ...account, type: "exchange" } });
     assert.equal(p.account_type, "other");
   });
+
+  test("sends compact HTML so links that exist only there reach the agent", () => {
+    const html =
+      '<html><head><style>.btn{color:red}</style></head><body><!-- tracking -->' +
+      '<img src="https://t.example/pixel.gif" width="1">' +
+      '<table cellpadding="0" style="width:100%"><tr><td class="x">' +
+      '<a href="https://boards.greenhouse.io/acme/jobs/4012345" style="color:#fff">Apply now</a>' +
+      "</td></tr></table></body></html>";
+    const p = buildEmailPayload({
+      header,
+      full: {
+        contentType: "multipart/alternative",
+        parts: [
+          { contentType: "text/plain", body: "A new job for you: Staff AI Engineer at Acme." },
+          { contentType: "text/html", body: html },
+        ],
+      },
+      account,
+    });
+    assert.equal(p.body_text, "A new job for you: Staff AI Engineer at Acme.");
+    assert.equal(
+      p.body_html,
+      '<html><body><table><tr><td><a href="https://boards.greenhouse.io/acme/jobs/4012345">Apply now</a></td></tr></table></body></html>',
+    );
+    assert.deepEqual(validateEmailPayload(p), []);
+  });
 });
 
 describe("validateEmailPayload", () => {

@@ -13,6 +13,8 @@ pub struct Config {
     pub snapshot_interval: Duration,
     /// Lease given to a claim that doesn't ask for one.
     pub default_lease: Duration,
+    /// Claims skip `new` links older than this (None = no limit).
+    pub max_age_hours: Option<u64>,
 }
 
 impl Config {
@@ -45,6 +47,10 @@ impl Config {
             ),
             snapshot_interval: Duration::from_secs(num("JOB_LINKS_SNAPSHOT_SECS", 5)?.max(1)),
             default_lease: Duration::from_secs(num("JOB_LINKS_LEASE_SECS", 900)?),
+            max_age_hours: match num("JOB_LINKS_MAX_AGE_HOURS", 336)? {
+                0 => None,
+                h => Some(h),
+            },
         })
     }
 }
@@ -67,6 +73,9 @@ mod tests {
         assert_eq!(c.port, 7810);
         assert_eq!(c.snapshot_path, PathBuf::from("data/job-links.json"));
         assert_eq!(c.snapshot_interval, Duration::from_secs(5));
+        assert_eq!(c.max_age_hours, Some(336));
         assert!(cfg(&[("JOB_LINKS_TOKEN", "0123456789abcdef"), ("JOB_LINKS_PORT", "70000")]).is_err());
+        let off = cfg(&[("JOB_LINKS_TOKEN", "0123456789abcdef"), ("JOB_LINKS_MAX_AGE_HOURS", "0")]).unwrap();
+        assert_eq!(off.max_age_hours, None);
     }
 }

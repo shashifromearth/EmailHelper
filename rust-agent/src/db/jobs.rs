@@ -11,6 +11,7 @@ use crate::error::{AppError, AppResult};
 // ---------------------------------------------------------------- jobs
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
 pub struct JobDetails {
     pub title: String,
     pub company: Option<String>,
