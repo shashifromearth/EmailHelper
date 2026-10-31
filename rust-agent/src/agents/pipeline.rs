@@ -294,6 +294,13 @@ answer EVERY questionnaire item.\n",
     };
     let draft_id = app.db.call(move |c| drafts::insert(c, &new)).await?;
     app.drafts_ready.notify_waiters();
+    crate::eval::live::spawn(
+        app,
+        draft_id.clone(),
+        format!("{}\n{}", e.subject, e.body_text.chars().take(2000).collect::<String>()),
+        grounding.clone(),
+        masked.clone(),
+    );
     app.metrics
         .drafts_created_total
         .with_label_values(&[verdict.as_str()])

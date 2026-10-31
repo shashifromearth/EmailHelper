@@ -530,3 +530,34 @@ async fn stale_mail_and_automated_senders_skip_the_llm() {
         .await;
     assert!(audit.to_string().contains("skipped_old"), "{audit}");
 }
+
+#[tokio::test]
+async fn excluded_senders_never_enter_the_system() {
+    let a = builder()
+        .env("EH_EXCLUDED_SENDERS", "hdfcbank.com; alerts@paytm.com")
+        .start()
+        .await;
+    let bank = email(
+        "acct1",
+        "<otp@hdfcbank.com>",
+        "HDFC Bank <InstaAlerts@mail.hdfcbank.com>",
+        "OTP for your transaction",
+        "Your OTP is 123456. Do not share it with anyone.",
+    );
+    let r = a.post("/api/v1/emails", &bank).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["status"], "excluded");
+    let stored: i64 = a
+        .app
+        .db
+        .call(|c| Ok(c.query_row("SELECT COUNT(*) FROM emails", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(stored, 0, "nothing from an excluded sender is stored");
+    assert_eq!(metric_sum(&a.metrics().await, "emails_excluded_total"), 1.0);
+    let status = a.get_json("/api/v1/status").await;
+    assert_eq!(status["excluded_senders"][0], "hdfcbank.com", "the Thunderbird extension reads the list here");
+    // other senders still flow normally
+    let ok = email("acct1", "<q@acme.com>", "bob@acme.com", "Question", "Can you share the pricing?");
+    assert_eq!(a.post("/api/v1/emails", &ok).await.status(), 202);
+}

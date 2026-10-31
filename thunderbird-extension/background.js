@@ -105,12 +105,28 @@ async function doFlushOutbox() {
   if (outbox.size) scheduleOutboxFlush(OUTBOX_RETRY_MS);
 }
 
+// Senders the user excluded in the agent's .env (EH_EXCLUDED_SENDERS),
+// refreshed from /api/v1/status at most every 10 minutes.
+let excludedSenders = { at: 0, list: [] };
+async function getExcludedSenders() {
+  if (Date.now() - excludedSenders.at < 10 * 60 * 1000) return excludedSenders.list;
+  try {
+    const s = await api.status();
+    excludedSenders = { at: Date.now(), list: Array.isArray(s?.excluded_senders) ? s.excluded_senders : [] };
+  } catch {
+    // keep the last list; the agent drops excluded senders again on its side
+    excludedSenders.at = Date.now() - 9 * 60 * 1000;
+  }
+  return excludedSenders.list;
+}
+
 const ingestor = createIngestor({
   messenger: mx,
   getConfig,
   dedupe,
   outbox,
   log,
+  getExcludedSenders,
   onEvent: (ev) => {
     if (ev.type === "error") state.recordError(`reading message: ${ev.error.message}`);
     if (ev.type === "invalid") state.recordError(`message ${ev.tbMessageId} skipped: ${ev.problems.join("; ")}`);

@@ -28,7 +28,22 @@ export async function* iterateMessageList(messenger, list) {
   }
 }
 
-export function createIngestor({ messenger, getConfig, dedupe, outbox, log = () => {}, onEvent = () => {}, accountCacheMs = 5 * 60 * 1000, now = () => Date.now() }) {
+/** Is this From header excluded? Entries are addresses or domains (subdomains included). */
+export function isExcludedSender(entries, from) {
+  if (!Array.isArray(entries) || !entries.length || !from) return false;
+  const m = /<([^>]+)>/.exec(String(from));
+  const addr = (m ? m[1] : String(from)).trim().toLowerCase();
+  const domain = addr.includes("@") ? addr.split("@").pop() : "";
+  return entries.some((raw) => {
+    const e = String(raw || "").trim().toLowerCase();
+    if (!e) return false;
+    if (e.includes("@") && !e.startsWith("@")) return e === addr;
+    const d = e.replace(/^@/, "");
+    return !!domain && (domain === d || domain.endsWith(`.${d}`));
+  });
+}
+
+export function createIngestor({ messenger, getConfig, dedupe, outbox, log = () => {}, onEvent = () => {}, accountCacheMs = 5 * 60 * 1000, now = () => Date.now(), getExcludedSenders = async () => [] }) {
   const accountCache = new Map(); // accountId -> { at, info }
   const inFlight = new Set();
 
@@ -71,13 +86,15 @@ export function createIngestor({ messenger, getConfig, dedupe, outbox, log = () 
 
   /**
    * Ingest one MessageHeader. Returns a status string:
-   * queued | duplicate | skipped_folder | skipped_junk | skipped_account | invalid | error
+   * queued | duplicate | skipped_folder | skipped_junk | skipped_sender | skipped_account | invalid | error
    */
   async function ingestMessage(header, folderHint = null) {
     const folder = header?.folder || folderHint;
     if (!header || !Number.isInteger(header.id)) return "invalid";
     if (shouldSkipFolder(folder)) return "skipped_folder";
     if (isJunk(header)) return "skipped_junk";
+    // excluded senders (banks etc.) are never read or sent to the agent
+    if (isExcludedSender(await getExcludedSenders(), header.author)) return "skipped_sender";
     const accountId = getFolderAccountId(folder);
     const cfg = await getConfig();
     if (!isAccountEnabled(cfg, accountId)) return "skipped_account";

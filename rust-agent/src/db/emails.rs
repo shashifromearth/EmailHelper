@@ -119,16 +119,7 @@ pub fn truncate_bytes(s: &str, max: usize) -> String {
 }
 
 /// Extract the bare address from `"Name" <a@b.com>` or `a@b.com`.
-pub fn email_address(from: &str) -> String {
-    let s = from.trim();
-    if let (Some(l), Some(r)) = (s.rfind('<'), s.rfind('>')) {
-        if l < r {
-            return s[l + 1..r].trim().to_ascii_lowercase();
-        }
-    }
-    s.trim_matches(|c| c == '"' || c == '\'')
-        .to_ascii_lowercase()
-}
+pub use eh_knowledge::text::email_address;
 
 /// Display name part of a From header (falls back to the local part).
 pub fn display_name(from: &str) -> String {

@@ -44,10 +44,11 @@
 <body>
 <header>
   <h1>EmailHelper</h1>
-  <div><span id="err"></span> <input id="token" type="password" placeholder="API token" size="18"> <button id="save">Connect</button> <button id="refresh">Refresh</button></div>
+  <div><span id="err"></span> <input id="token" type="password" placeholder="API token" size="18"> <button id="save">Connect</button> <button id="refresh">Refresh</button> <button id="reindex" title="Re-read the knowledge folder: chunk, embed and index new or changed documents">Re-index knowledge</button></div>
 </header>
 <main>
   <div class="tiles" id="tiles"></div>
+  <p class="muted" id="kstatus"></p>
   <section><h2>Waiting for you</h2><div class="scroll" id="questions"></div></section>
   <section><h2>Applications</h2><div class="scroll" id="apps"></div></section>
   <section id="unassigned-section" hidden><h2>Mailboxes not in people.json (classified only, no drafts)</h2><div class="scroll" id="unassigned"></div></section>
@@ -156,6 +157,28 @@
   });
   document.getElementById("save").addEventListener("click", function () { setToken(document.getElementById("token").value.trim()); load(); });
   document.getElementById("refresh").addEventListener("click", load);
+  async function knowledgeStatus() {
+    var el = document.getElementById("kstatus");
+    try {
+      var res = await fetch("/api/v1/knowledge/status", { headers: { "X-EmailHelper-Token": getToken() } });
+      if (!res.ok) { el.textContent = "Knowledge service: unavailable (drafts use the local keyword index)."; return; }
+      var d = await res.json(), ix = d.index || {};
+      var emb = (ix.embedded || []).map(function (e) { return e[0] + " " + e[1] + "/" + ix.chunks; }).join(", ");
+      el.textContent = "Knowledge: " + ix.documents + " documents, " + ix.chunks + " chunks; embedded " + (emb || "none") +
+        (d.running ? "; indexing now…" : "") + (ix.last_etl ? "; last run " + new Date(ix.last_etl).toLocaleString() : "");
+    } catch (e) { el.textContent = ""; }
+  }
+  document.getElementById("reindex").addEventListener("click", async function () {
+    var err = document.getElementById("err");
+    try {
+      var res = await fetch("/api/v1/knowledge/reindex", { method: "POST", headers: { "X-EmailHelper-Token": getToken() } });
+      var body = await res.json().catch(function () { return {}; });
+      err.textContent = res.ok ? (body.status === "already_running" ? "Indexing is already running." : "Indexing started.") : ("Error: " + (body.message || res.status));
+    } catch (e) { err.textContent = "Agent unreachable."; }
+    setTimeout(knowledgeStatus, 1500);
+  });
+  knowledgeStatus();
+  setInterval(knowledgeStatus, 60000);
   load();
   setInterval(load, 60000);
 })();

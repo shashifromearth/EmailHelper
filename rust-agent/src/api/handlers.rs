@@ -29,6 +29,14 @@ pub async fn submit_email(
             return Ok(r.into_response());
         }
     };
+    // Excluded senders (banks etc.) never enter the system: nothing is stored,
+    // classified or sent to a model.
+    if eh_knowledge::text::SenderFilter::new(&app.cfg.excluded_senders).excludes(&e.from) {
+        let domain = emails::email_address(&e.from).rsplit_once('@').map(|(_, d)| d.to_string()).unwrap_or_default();
+        tracing::info!(sender_domain = %domain, "email from an excluded sender dropped");
+        app.metrics.emails_excluded_total.inc();
+        return Ok((StatusCode::OK, Json(json!({ "status": "excluded" }))).into_response());
+    }
     e.validate(app.cfg.max_email_text_bytes)?;
     let oversized: Vec<String> = e
         .attachments
@@ -286,7 +294,10 @@ pub async fn status(State(app): State<Arc<App>>) -> AppResult<Json<Value>> {
         "telegram_enabled": app.notifier.enabled(),
         "job_agent_enabled": app.cfg.jobs.enabled,
         "research_enabled": app.cfg.research.enabled,
+        // the Thunderbird extension skips these senders before reading the mail
+        "excluded_senders": app.cfg.excluded_senders,
         "research_ran_today": research_today.0,
+        "draft_quality_7d": crate::eval::live::summary(&app, 7).await.ok(),
         "research_last_run": research_today.1,
         "uptime_secs": app.started_at.elapsed().as_secs(),
     })))
@@ -556,6 +567,24 @@ pub async fn list_recruiters(
         .call(move |c| jdb::list_recruiters(c, q.company.as_deref(), limit))
         .await?;
     Ok(Json(json!({ "recruiters": r })))
+}
+
+/// Dashboard: start a knowledge index run on the knowledge service.
+pub async fn knowledge_reindex(State(app): State<Arc<App>>) -> AppResult<(StatusCode, Json<Value>)> {
+    let r = app
+        .knowledge
+        .remote()
+        .ok_or_else(|| AppError::Validation("the knowledge service is not configured (KNOWLEDGE_SERVICE_URL)".into()))?;
+    Ok((StatusCode::ACCEPTED, Json(r.reindex().await?)))
+}
+
+/// Dashboard: index size, embedding coverage and the last run's report.
+pub async fn knowledge_status(State(app): State<Arc<App>>) -> AppResult<Json<Value>> {
+    let r = app
+        .knowledge
+        .remote()
+        .ok_or_else(|| AppError::Validation("the knowledge service is not configured (KNOWLEDGE_SERVICE_URL)".into()))?;
+    Ok(Json(r.status().await?))
 }
 
 pub async fn run_research(State(app): State<Arc<App>>) -> AppResult<(StatusCode, Json<Value>)> {

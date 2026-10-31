@@ -7,6 +7,7 @@ pub mod app;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod eval;
 pub mod jobs;
 pub mod knowledge;
 pub mod llm;

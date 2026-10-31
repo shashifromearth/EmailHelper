@@ -70,38 +70,7 @@ pub fn prune(c: &mut Connection, keep: &[String]) -> AppResult<usize> {
     Ok(removed)
 }
 
-/// Build a safe FTS5 MATCH expression from free text: alphanumeric terms of
-/// length >= 3, quoted and OR-ed together. Returns `None` if nothing usable.
-pub fn fts_query(text: &str, max_terms: usize) -> Option<String> {
-    const STOP: &[&str] = &[
-        "the", "and", "for", "you", "your", "with", "this", "that", "are", "was", "have", "has",
-        "but", "not", "from", "our", "can", "will", "would", "could", "please", "thanks", "thank",
-        "hello", "regards", "best", "dear", "what", "when", "where", "which", "who", "how",
-        "about", "there", "their", "they", "them", "been", "were", "also", "just", "any", "all",
-        "out",
-    ];
-    let mut terms: Vec<String> = Vec::new();
-    for raw in text.split(|c: char| !c.is_alphanumeric()) {
-        let t = raw.to_lowercase();
-        if t.chars().count() < 3 || STOP.contains(&t.as_str()) || terms.contains(&t) {
-            continue;
-        }
-        terms.push(t);
-        if terms.len() >= max_terms {
-            break;
-        }
-    }
-    if terms.is_empty() {
-        return None;
-    }
-    Some(
-        terms
-            .iter()
-            .map(|t| format!("\"{t}\""))
-            .collect::<Vec<_>>()
-            .join(" OR "),
-    )
-}
+pub use eh_knowledge::text::fts_query;
 
 pub fn search(c: &Connection, query_text: &str, limit: usize) -> AppResult<Vec<Snippet>> {
     let Some(q) = fts_query(query_text, 24) else {

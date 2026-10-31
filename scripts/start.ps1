@@ -30,10 +30,12 @@ $bin = Join-Path $root 'data\bin\emailhelper.exe'
 New-Item -ItemType Directory -Force (Split-Path $bin) | Out-Null
 
 # 1. Build when needed.
-$needBuild = $Rebuild -or -not (Test-Path $bin)
+$ksBin = Join-Path (Split-Path $bin) 'knowledge-service.exe'
+$needBuild = $Rebuild -or -not (Test-Path $bin) -or -not (Test-Path $ksBin)
 if (-not $needBuild -and -not $NoBuild) {
     $built = (Get-Item $bin).LastWriteTime
-    $newer = Get-ChildItem -Recurse -File (Join-Path $root 'rust-agent\src'), (Join-Path $root 'rust-agent\Cargo.toml') |
+    $newer = Get-ChildItem -Recurse -File (Join-Path $root 'rust-agent\src'), (Join-Path $root 'rust-agent\Cargo.toml'),
+            (Join-Path $root 'knowledge-core\src'), (Join-Path $root 'knowledge-service\src') |
         Where-Object { $_.LastWriteTime -gt $built } | Select-Object -First 1
     $needBuild = $null -ne $newer
 }
@@ -43,7 +45,7 @@ if ($needBuild -and -not $NoBuild) {
         exit 1
     }
     Write-Host 'building the agent (release)... this can take a few minutes'
-    cargo build --release -p emailhelper
+    cargo build --release -p emailhelper -p knowledge-service
     if ($LASTEXITCODE -ne 0) { Write-Host 'build failed; nothing was restarted.' -ForegroundColor Red; exit 1 }
 }
 
@@ -59,8 +61,18 @@ if (Get-Command ollama -ErrorAction SilentlyContinue) {
 
 # 3. Restart (the running binary is locked, so stop before replacing it).
 & (Join-Path $PSScriptRoot 'stop-local.ps1') | Out-Null
-if ($needBuild -and -not $NoBuild) {
-    Copy-Item (Join-Path $root 'target\release\emailhelper.exe') $bin -Force
+# Copy each freshly built binary over the running copy; Windows may hold a
+# just-stopped program's file for a moment, so retry briefly.
+foreach ($pair in @(@('emailhelper.exe', $bin), @('knowledge-service.exe', $ksBin))) {
+    $src = Join-Path $root "target\release\$($pair[0])"
+    $dst = $pair[1]
+    if (-not (Test-Path $src)) { continue }
+    if ((Test-Path $dst) -and (Get-Item $src).LastWriteTime -le (Get-Item $dst).LastWriteTime) { continue }
+    for ($i = 0; $i -lt 20; $i++) {
+        try { Copy-Item $src $dst -Force -ErrorAction Stop; break }
+        catch { Start-Sleep -Milliseconds 500 }
+    }
+    if ((Get-Item $src).LastWriteTime -gt (Get-Item $dst).LastWriteTime) { Write-Host "could not replace $dst (still in use)" -ForegroundColor Yellow }
 }
 if ($WithMockSites) {
     & (Join-Path $PSScriptRoot 'run-local.ps1') -Binary $bin -WithMockSites

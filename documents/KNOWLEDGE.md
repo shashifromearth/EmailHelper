@@ -113,6 +113,31 @@ with cloud models.
 
 ## Resumes and tech stacks
 
+### Stack folders (recommended)
+
+Put each stack's resume in its own folder under `resumes/`. The folder name
+decides the stack, so every file can simply be called `resume.docx` or
+`resume.pdf`:
+
+```
+people/<id>/resumes/dotnet/resume.docx
+people/<id>/resumes/java/resume.pdf
+people/<id>/resumes/python/resume.docx
+people/<id>/resumes/golang/resume.docx
+people/<id>/resumes/rust/resume.docx
+people/<id>/resumes/polyglot/resume.docx     general resume; used when no stack matches
+people/<id>/consulting/resumes/genai/profile.pdf
+```
+
+Recognised folder names include `dotnet`, `net`, `csharp`, `java`, `spring`,
+`python`, `django`, `fastapi`, `golang`, `go`, `rust`, `node`, `react`,
+`genai`, `ai`, `ml`, `aws`, `azure`, `devops` and `polyglot`/`general`. For
+each job the agent picks the folder whose stack best matches the job's
+skills, and the polyglot resume when nothing matches. File-name hints such as
+`Shashi_DotNet_Resume.docx` keep working.
+
+### Older layout: stack in the file name
+
 Name resume files after their stack, for example
 `Shashi_DotNet_Resume.docx`, `Resume_GOLANG_PYTHON_AWS.docx` or
 `resume_rust.docx`.
@@ -169,6 +194,33 @@ each sample job would get), run:
 ```bash
 cargo run -p emailhelper --example profile_check -- knowledge
 ```
+
+## Indexing (RAG)
+
+The knowledge service indexes this folder for the email agent and the Chrome
+extension:
+
+- **Structure-aware ETL.** `.docx` is split at heading styles and short bold
+  titles, with tables kept as rows. `.pdf` is split at title-like lines,
+  `.md` at `#` headings and `.json` by top-level key with key paths kept
+  (`jobs[0].company: Acme`). `.txt` is split by paragraphs.
+- **Chunks.** About 900 characters with 150 characters of overlap. A chunk
+  never crosses a section. Each one is titled "Document › Section" and
+  carries metadata: person, purpose, document type (resume, skills,
+  experience, compensation, reply guide…) and stack.
+- **Embeddings.** Every chunk is embedded by Gemini `gemini-embedding-001`
+  (768 dimensions, free tier) and by the local Ollama model
+  `nomic-embed-text`. Searches use Gemini when it answers and the local
+  model otherwise.
+- **Store.** One SQLite file (`data/knowledge.db`) holds the chunks, a
+  keyword index (FTS5) and one sqlite-vec vector table per model.
+- **Search.** Hybrid: vector similarity, keyword (BM25) and metadata
+  filters (person, purpose, document type), merged with reciprocal-rank
+  fusion. A requested stack's resume gets a small boost.
+- **When it runs.** At startup and then once a day (checked every
+  `RAG_ETL_CHECK_HOURS`), plus the **Re-index knowledge** button on the
+  dashboard. Only changed files are re-chunked; removed files are dropped.
+- **Never indexed:** `private.json`, the `private/` folder and `people.json`.
 
 ## Telegram (one bot for everyone)
 

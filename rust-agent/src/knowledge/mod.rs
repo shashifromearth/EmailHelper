@@ -1,9 +1,8 @@
 //! Local knowledge base: the user's profile plus SQLite FTS5 retrieval over
 //! every markdown, text and JSON file in the knowledge directory.
 
-pub mod docx;
-pub mod people;
-pub mod profile;
+pub use eh_knowledge::{docx, people, profile};
+pub mod remote;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -23,6 +22,8 @@ pub struct KnowledgeBase {
     /// Fingerprint of the files the people registry reads but the search
     /// index skips (people.json, private.json), to notice edits to them.
     people_stamp: std::sync::Mutex<u64>,
+    /// The knowledge service (hybrid RAG search); the local keyword index is the fallback.
+    remote: std::sync::OnceLock<remote::KnowledgeClient>,
 }
 
 /// Restricts retrieval to one person (and optionally one purpose) plus
@@ -94,7 +95,17 @@ impl KnowledgeBase {
             db,
             people: RwLock::new(people),
             people_stamp: std::sync::Mutex::new(stamp),
+            remote: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Use the knowledge service for searches.
+    pub fn set_remote(&self, client: remote::KnowledgeClient) {
+        let _ = self.remote.set(client);
+    }
+
+    pub fn remote(&self) -> Option<&remote::KnowledgeClient> {
+        self.remote.get()
     }
 
     pub fn people(&self) -> Arc<People> {
@@ -206,6 +217,14 @@ impl KnowledgeBase {
         limit: usize,
         scope: &Scope,
     ) -> AppResult<Vec<Snippet>> {
+        if let Some(r) = self.remote.get() {
+            let person = scope.person_dir.as_deref().and_then(|p| p.strip_prefix("people/"));
+            match r.search(query, person, scope.purpose.as_deref(), limit).await {
+                Ok(hits) if !hits.is_empty() => return Ok(hits),
+                Ok(_) => {}
+                Err(e) => tracing::debug!(error = %e, "knowledge service search failed; using the local index"),
+            }
+        }
         let q = query.to_string();
         let fetch = if scope.person_dir.is_some() {
             limit * 8

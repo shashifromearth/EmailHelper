@@ -1,6 +1,7 @@
 //! Job detail extraction from a rendered page (browser worker) or plain HTML:
 //! schema.org JobPosting JSON-LD first, heuristics second.
 
+pub use eh_knowledge::text::{contains_word, COMMON_SKILLS};
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -284,55 +285,6 @@ pub fn split_title(t: &str) -> (String, Option<String>) {
     (t.to_string(), None)
 }
 
-pub const COMMON_SKILLS: &[&str] = &[
-    "Rust",
-    "Python",
-    "Go",
-    "Java",
-    "TypeScript",
-    "JavaScript",
-    "C++",
-    "Scala",
-    "Kotlin",
-    "SQL",
-    "PyTorch",
-    "TensorFlow",
-    "JAX",
-    "LLM",
-    "LLMs",
-    "RAG",
-    "LangChain",
-    "LlamaIndex",
-    "Transformers",
-    "Hugging Face",
-    "MLOps",
-    "Kubernetes",
-    "Docker",
-    "Terraform",
-    "AWS",
-    "GCP",
-    "Azure",
-    "Kafka",
-    "Spark",
-    "Airflow",
-    "PostgreSQL",
-    "Redis",
-    "Elasticsearch",
-    "Vector databases",
-    "gRPC",
-    "Tokio",
-    "Machine Learning",
-    "Deep Learning",
-    "NLP",
-    "Computer Vision",
-    "Generative AI",
-    "GenAI",
-    "Prompt Engineering",
-    "Fine-tuning",
-    "Distributed Systems",
-    "Microservices",
-    "React",
-];
 
 pub fn enrich_from_text(d: &mut JobDetails, text: &str, skill_vocab: &[String]) {
     let lower = text.to_lowercase();
@@ -434,32 +386,6 @@ pub fn remote_mode(location: &str, lower_text: &str) -> &'static str {
     } else {
         "unknown"
     }
-}
-
-/// Whole-word (ASCII boundary) containment so "Go" doesn't match "good".
-pub fn contains_word(hay: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let bytes = hay.as_bytes();
-    let mut start = 0;
-    while let Some(pos) = hay[start..].find(needle) {
-        let i = start + pos;
-        let j = i + needle.len();
-        let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
-        let after_ok = j >= bytes.len() || !bytes[j].is_ascii_alphanumeric();
-        if before_ok && after_ok {
-            return true;
-        }
-        start = i + needle.len().max(1);
-        if start >= hay.len() {
-            break;
-        }
-        while !hay.is_char_boundary(start) {
-            start += 1;
-        }
-    }
-    false
 }
 
 /// Parse "₹40 - 60 LPA", "$180k - $220k", "30-45 LPA" into annual numbers.

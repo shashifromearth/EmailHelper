@@ -36,8 +36,13 @@ function Start-Component([string]$Name, [string]$File, [string[]]$ArgList, [stri
         $old = Get-Process -Id (Get-Content $pidFile) -ErrorAction SilentlyContinue
         if ($null -ne $old) { Write-Host "$Name already running (pid $($old.Id))"; return }
     }
-    $p = Start-Process $File -ArgumentList $ArgList -WorkingDirectory $Dir -PassThru -WindowStyle Hidden `
-        -RedirectStandardOutput (Join-Path $logs "$Name.log") -RedirectStandardError (Join-Path $logs "$Name.err.log")
+    $opts = @{
+        FilePath = $File; WorkingDirectory = $Dir; PassThru = $true; WindowStyle = 'Hidden'
+        RedirectStandardOutput = (Join-Path $logs "$Name.log"); RedirectStandardError = (Join-Path $logs "$Name.err.log")
+    }
+    # Start-Process rejects an empty -ArgumentList
+    if ($ArgList -and $ArgList.Count -gt 0) { $opts.ArgumentList = $ArgList }
+    $p = Start-Process @opts
     Set-Content $pidFile $p.Id
     Write-Host "started $Name (pid $($p.Id)) - logs: data\logs\$Name.log"
 }
@@ -64,6 +69,20 @@ if ($env:JOB_AGENT_ENABLED -eq 'true' -or $env:RECRUITER_LINKEDIN_ENABLED -eq 't
     $port = if ($env:BROWSER_WORKER_PORT) { $env:BROWSER_WORKER_PORT } else { '7801' }
     if (Wait-Http "http://127.0.0.1:$port/health" 20) { Write-Host "browser worker: http://127.0.0.1:$port/health" }
     else { Write-Warning "browser worker not healthy yet; see data\logs\browser-worker.err.log" }
+}
+
+# Knowledge service (hybrid RAG search), from the same folder as the agent binary.
+$binDir = if ($Binary) { Split-Path $Binary } else { Join-Path $root 'target\release' }
+$ks = Join-Path $binDir 'knowledge-service.exe'
+if (-not (Test-Path $ks)) { $ks = Join-Path $root 'target\release\knowledge-service.exe' }
+if (-not (Test-Path $ks)) { $ks = Join-Path $root 'target\debug\knowledge-service.exe' }
+if (Test-Path $ks) {
+    Start-Component 'knowledge-service' $ks @() $root
+    $ksAddr = if ($env:KNOWLEDGE_SERVICE_ADDR) { $env:KNOWLEDGE_SERVICE_ADDR } else { '127.0.0.1:7820' }
+    if (Wait-Http "http://$ksAddr/livez" 20) { Write-Host "knowledge service: http://$ksAddr/health" }
+    else { Write-Warning "knowledge service not live yet; see data\logs\knowledge-service.log" }
+} else {
+    Write-Warning "knowledge-service binary not found; drafts use the local keyword index"
 }
 
 if (-not $Binary) {

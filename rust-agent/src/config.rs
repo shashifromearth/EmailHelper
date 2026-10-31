@@ -198,6 +198,13 @@ pub struct Config {
     pub max_body_bytes: usize,
     pub max_email_text_bytes: usize,
     pub max_attachment_bytes: u64,
+    /// Senders never processed (EH_EXCLUDED_SENDERS: addresses and domains).
+    pub excluded_senders: Vec<String>,
+    /// Knowledge service base URL (None = local keyword search only).
+    pub knowledge_service_url: Option<String>,
+    pub knowledge_service_token: String,
+    /// Share of real drafts judged in the background (0.0-1.0).
+    pub eval_live_sample: f64,
     pub workflow_version: u32,
     pub max_retries: u32,
     /// Mail older than this is recorded but not sent to the LLM (0 = no limit).
@@ -431,6 +438,14 @@ impl Config {
             max_body_bytes: num("EH_MAX_BODY_BYTES", 256 * 1024)? as usize,
             max_email_text_bytes: num("EH_MAX_EMAIL_TEXT_BYTES", 64 * 1024)? as usize,
             max_attachment_bytes: num("EH_MAX_ATTACHMENT_BYTES", 25 * 1024 * 1024)?,
+            excluded_senders: list("EH_EXCLUDED_SENDERS"),
+            knowledge_service_url: match s("KNOWLEDGE_SERVICE_URL").as_deref() {
+                Some("none") | Some("off") => None,
+                Some(u) => Some(u.to_string()),
+                None => Some("http://127.0.0.1:7820".to_string()),
+            },
+            knowledge_service_token: s("KNOWLEDGE_SERVICE_TOKEN").or_else(|| s("EH_API_TOKEN")).unwrap_or_default(),
+            eval_live_sample: s("EVAL_LIVE_SAMPLE").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.25).clamp(0.0, 1.0),
             workflow_version: num("EH_WORKFLOW_VERSION", 1)? as u32,
             max_retries: num("EH_MAX_RETRIES", 3)? as u32,
             max_email_age_hours: num("EH_MAX_EMAIL_AGE_HOURS", 72)?,

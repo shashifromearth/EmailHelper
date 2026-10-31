@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use super::profile::Profile;
+use crate::profile::Profile;
 
 pub const LEGACY_ID: &str = "default";
 pub const JOB_SEEKING: &str = "job_seeking";
@@ -198,6 +198,8 @@ pub struct Resume {
     /// Purpose folder the file lives in (`consulting`, `freelancing`, …);
     /// None for files in the person's own folder.
     pub purpose: Option<String>,
+    /// Stack folder the file lives in (`resumes/dotnet/resume.docx` → "dotnet").
+    pub stack: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -322,7 +324,9 @@ impl People {
         });
         let Some(file) = file.filter(|f| !f.people.is_empty()) else {
             let profile = Arc::new(Profile::load(knowledge_dir));
-            let resumes = scan_resumes(&[(knowledge_dir.join("resumes"), true, None)], &profile);
+            let mut dirs = Vec::new();
+            resumes_folder(knowledge_dir.join("resumes"), None, &mut dirs);
+            let resumes = scan_resumes(&dirs, &profile);
             let person = Person {
                 id: LEGACY_ID.into(),
                 name: profile.display_name().to_string(),
@@ -431,7 +435,7 @@ impl People {
             candidates.push(a.trim().to_ascii_lowercase());
         }
         for addr in to.iter().chain(cc.iter()) {
-            candidates.push(crate::db::emails::email_address(addr));
+            candidates.push(crate::text::email_address(addr));
         }
         for c in &candidates {
             for p in &self.persons {
@@ -505,6 +509,9 @@ const NAME_HINTS: &[(&str, &[&str])] = &[
     ("k8s", &["Kubernetes"]),
     ("azure", &["Azure"]),
     ("architect", &["System Design", "Microservices"]),
+    // a general resume covering several stacks: no specific tags, so it is the default
+    ("polyglot", &[]),
+    ("general", &[]),
 ];
 
 #[derive(Deserialize)]
@@ -525,15 +532,34 @@ pub fn resume_text(path: &Path) -> String {
         .map(|e| e.to_ascii_lowercase())
         .as_deref()
     {
-        Some("docx") => super::docx::extract_text(path).unwrap_or_default(),
+        Some("docx") => crate::docx::extract_text(path).unwrap_or_default(),
         Some("md" | "txt") => std::fs::read_to_string(path).unwrap_or_default(),
         _ => String::new(),
     }
 }
 
 /// Directories that may hold a person's resumes, with their purpose.
-fn resume_dirs(person_dir: &Path) -> Vec<(PathBuf, bool, Option<String>)> {
-    let mut dirs = vec![(person_dir.to_path_buf(), false, None)];
+/// A folder to scan for resumes: (dir, dedicated resumes folder, purpose, stack).
+type ResumeDir = (PathBuf, bool, Option<String>, Option<String>);
+
+/// A `resumes/` folder and its stack subfolders (`resumes/dotnet/`, `resumes/polyglot/`…).
+fn resumes_folder(dir: PathBuf, purpose: Option<String>, out: &mut Vec<ResumeDir>) {
+    let mut stacks: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
+        .unwrap_or_default();
+    stacks.sort();
+    out.push((dir, true, purpose.clone(), None));
+    for s in stacks {
+        let name = s.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if !name.starts_with('.') {
+            out.push((s, true, purpose.clone(), Some(name)));
+        }
+    }
+}
+
+/// Directories that may hold a person's resumes, with their purpose and stack.
+fn resume_dirs(person_dir: &Path) -> Vec<ResumeDir> {
+    let mut dirs = vec![(person_dir.to_path_buf(), false, None, None)];
     let mut subs: Vec<PathBuf> = std::fs::read_dir(person_dir)
         .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
         .unwrap_or_default();
@@ -543,9 +569,14 @@ fn resume_dirs(person_dir: &Path) -> Vec<(PathBuf, bool, Option<String>)> {
         if name.starts_with('.') || name == "private" || name == "replies" {
             continue;
         }
+        if name.eq_ignore_ascii_case("resumes") {
+            // the person's own resumes/ (general purpose)
+            resumes_folder(sub, None, &mut dirs);
+            continue;
+        }
         let purpose = normalize_purpose(&name);
-        dirs.push((sub.clone(), false, Some(purpose.clone())));
-        dirs.push((sub.join("resumes"), true, Some(purpose)));
+        dirs.push((sub.clone(), false, Some(purpose.clone()), None));
+        resumes_folder(sub.join("resumes"), Some(purpose), &mut dirs);
     }
     dirs
 }
@@ -553,10 +584,10 @@ fn resume_dirs(person_dir: &Path) -> Vec<(PathBuf, bool, Option<String>)> {
 /// Scan resume files. Each entry is (directory, is_dedicated_resume_dir,
 /// purpose): a dedicated `resumes/` folder may also hold .md/.txt resumes;
 /// other folders only contribute documents (.docx/.pdf/.doc/.rtf).
-fn scan_resumes(dirs: &[(PathBuf, bool, Option<String>)], profile: &Profile) -> Vec<Resume> {
-    let mut files: Vec<(PathBuf, Option<String>)> = Vec::new();
+fn scan_resumes(dirs: &[ResumeDir], profile: &Profile) -> Vec<Resume> {
+    let mut files: Vec<(PathBuf, Option<String>, Option<String>)> = Vec::new();
     let mut index: Vec<ResumeIndexEntry> = Vec::new();
-    for (dir, dedicated, purpose) in dirs {
+    for (dir, dedicated, purpose, stack) in dirs {
         let Ok(rd) = std::fs::read_dir(dir) else {
             continue;
         };
@@ -577,7 +608,7 @@ fn scan_resumes(dirs: &[(PathBuf, bool, Option<String>)], profile: &Profile) -> 
             })
             .collect();
         found.sort();
-        files.extend(found.into_iter().map(|p| (p, purpose.clone())));
+        files.extend(found.into_iter().map(|p| (p, purpose.clone(), stack.clone())));
         if let Some(entries) = std::fs::read_to_string(dir.join("resumes.json"))
             .ok()
             .and_then(|raw| serde_json::from_str::<Vec<ResumeIndexEntry>>(&raw).ok())
@@ -585,7 +616,7 @@ fn scan_resumes(dirs: &[(PathBuf, bool, Option<String>)], profile: &Profile) -> 
             index.extend(entries);
         }
     }
-    let mut vocab: Vec<String> = crate::jobs::extract::COMMON_SKILLS
+    let mut vocab: Vec<String> = crate::text::COMMON_SKILLS
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -609,7 +640,7 @@ fn scan_resumes(dirs: &[(PathBuf, bool, Option<String>)], profile: &Profile) -> 
     }
     let mut out: Vec<Resume> = files
         .into_iter()
-        .map(|(path, purpose)| {
+        .map(|(path, purpose, stack)| {
             let file_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -619,7 +650,12 @@ fn scan_resumes(dirs: &[(PathBuf, bool, Option<String>)], profile: &Profile) -> 
                 .map(|s| s.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
             let mut name_tags: Vec<String> = Vec::new();
-            for token in stem.split(|c: char| !c.is_ascii_alphanumeric()) {
+            // The stack folder name counts like a word in the file name.
+            let folder = stack.clone().unwrap_or_default().to_lowercase();
+            for token in folder
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .chain(stem.split(|c: char| !c.is_ascii_alphanumeric()))
+            {
                 if let Some((_, tags)) = NAME_HINTS.iter().find(|(k, _)| *k == token) {
                     for t in *tags {
                         if !name_tags.iter().any(|x| x == t) {
@@ -641,7 +677,7 @@ fn scan_resumes(dirs: &[(PathBuf, bool, Option<String>)], profile: &Profile) -> 
             let text = resume_text(&path).to_lowercase();
             let tags: Vec<String> = vocab
                 .iter()
-                .filter(|s| crate::jobs::extract::contains_word(&text, &s.to_lowercase()))
+                .filter(|s| crate::text::contains_word(&text, &s.to_lowercase()))
                 .cloned()
                 .collect();
             Resume {
@@ -651,6 +687,7 @@ fn scan_resumes(dirs: &[(PathBuf, bool, Option<String>)], profile: &Profile) -> 
                 name_tags,
                 tags,
                 purpose,
+                stack,
             }
         })
         .collect();
@@ -826,5 +863,24 @@ mod tests {
         let (r, _) = s.select_resume(&["Python".into()], Some(JOB_SEEKING)).unwrap();
         assert_eq!(r.file_name, "python_resume.md", "job applications never use consulting docs");
         assert!(s.resumes.iter().all(|r| r.file_name != "Shashi_Consulting_Profile.md"), ".md outside resumes/ is not a resume");
+    }
+
+    #[test]
+    fn stack_folders_decide_the_stack() {
+        let d = setup();
+        let k = d.path();
+        let base = k.join("people/shashi/resumes");
+        write(&base.join("dotnet/resume.md"), "C# ASP.NET Core Azure");
+        write(&base.join("golang/resume.md"), "Go gRPC Kubernetes");
+        write(&base.join("polyglot/resume.md"), "Python Java Go .NET");
+        let people = People::load(k);
+        let s = people.person("shashi").unwrap();
+        let dotnet = s.resumes.iter().find(|r| r.stack.as_deref() == Some("dotnet")).unwrap();
+        assert!(dotnet.name_tags.contains(&".NET".to_string()), "{:?}", dotnet.name_tags);
+        assert_eq!(dotnet.purpose, None, "the person's own resumes/ folder is general");
+        let (r, _) = s.select_resume(&["Go".into(), "gRPC".into()], None).unwrap();
+        assert_eq!(r.stack.as_deref(), Some("golang"));
+        let (r, _) = s.select_resume(&["COBOL".into()], None).unwrap();
+        assert_eq!(r.stack.as_deref(), Some("polyglot"), "polyglot is the default when nothing matches");
     }
 }

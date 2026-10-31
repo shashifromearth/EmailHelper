@@ -22,10 +22,38 @@
                                                      Lever/Ashby public APIs
 ```
 
+### Services
+
+All services are Rust (except the extensions), talk HTTP on loopback with a
+token, expose `/livez` and `/readyz` (the agent: `/liveness`, `/readiness`),
+log JSON, and start together with `run.cmd`.
+
+| Service | Port | Role |
+|---|---|---|
+| Email agent (`rust-agent`) | 7800 | Thunderbird intake, drafts, Telegram, research schedule, dashboard |
+| Knowledge service (`knowledge-service`) | 7820 | ETL, embeddings, hybrid search, resume choice, profile for form filling |
+| Job-links service (`job-links`) | 7810 | Shared job database: links from email and research; the applier works through it |
+
+The people/profile/resume domain and the ETL live in the `knowledge-core`
+library (`eh_knowledge`), shared by the agent and the knowledge service.
+
+```
+Thunderbird ──► email agent ──► knowledge service (hybrid search)  ◄── Chrome extension
+                    │                                                     │
+                    └──► job-links service (job DB)  ◄────────────────────┘
+research agent ─────┘
+```
+
+The agent calls the knowledge service with short timeouts and a circuit
+breaker. While the service is down it searches its own keyword index, so
+drafting never stops.
+
 | Component | Tech | Location |
 |---|---|---|
 | Thunderbird extension | MailExtension (MV2, TB 115+) | `thunderbird-extension/` |
 | Orchestrator | Rust, tokio, axum, rusqlite, reqwest | `rust-agent/` |
+| Knowledge service | Rust, axum, SQLite + FTS5 + sqlite-vec | `knowledge-service/` |
+| Knowledge domain library | Rust | `knowledge-core/` |
 | Browser worker | Node.js 20+, Playwright Chromium | `browser-worker/` |
 | Knowledge | JSON + Markdown files | `knowledge/` |
 | Ops | Docker Compose, Prometheus, Grafana, systemd, Windows tasks | `docker/`, `monitoring/`, `deploy/` |

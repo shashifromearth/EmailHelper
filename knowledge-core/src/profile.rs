@@ -350,7 +350,7 @@ pub fn countries_in(text: &str) -> Vec<&'static str> {
         .filter(|(_, aliases)| {
             aliases
                 .iter()
-                .any(|a| crate::jobs::extract::contains_word(&t, a))
+                .any(|a| crate::text::contains_word(&t, a))
         })
         .map(|(name, _)| *name)
         .collect()
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn loads_sample_knowledge() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/knowledge");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rust-agent/tests/fixtures/knowledge");
         let p = Profile::load(&dir);
         assert!(!p.identity.full_name.is_empty());
         assert!(!p.identity.first_name.is_empty());

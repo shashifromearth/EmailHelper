@@ -84,6 +84,13 @@ impl App {
             )
         });
         let knowledge = KnowledgeBase::new(cfg.knowledge_dir.clone(), db.clone());
+        if let Some(url) = &cfg.knowledge_service_url {
+            knowledge.set_remote(crate::knowledge::remote::KnowledgeClient::new(
+                http.clone(),
+                url,
+                &cfg.knowledge_service_token,
+            ));
+        }
         let queue = Queue::new(db.clone(), metrics.clone());
         Ok(Arc::new(Self {
             cfg,

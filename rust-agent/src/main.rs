@@ -14,6 +14,8 @@ const USAGE: &str =
   telegram-chats  List chats that messaged the bot (to fill TELEGRAM_CHAT_ID / people.json)
   telegram-test   Check the bot token and send a test message to TELEGRAM_CHAT_ID
   llm-test        Send a one-line test prompt to every configured model provider
+  eval generate [N]   Build the RAG evaluation set (default 500 questions) in data/eval/dataset.jsonl
+  eval run [N]        Answer and judge the set (first N items); report in data/eval/
   apply-benchmark [N]  Practice-run the job agent on N real postings (fills forms, never submits)
   job-digest-now  Send the Telegram digest of jobs to apply to yourself now
   healthcheck   Exit 0 if the running agent reports healthy (for Docker/systemd)
@@ -146,7 +148,7 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        "reindex" | "discover-now" | "apply-benchmark" | "job-digest-now" | "serve" => {
+        "reindex" | "discover-now" | "apply-benchmark" | "job-digest-now" | "eval" | "serve" => {
             if let Err(e) = ensure_api_token(&mut cfg) {
                 tracing::error!(error = %e, "cannot prepare API token");
                 return ExitCode::FAILURE;
@@ -208,6 +210,53 @@ Report: {}",
                         Err(e) => {
                             tracing::error!(error = %e, "benchmark failed");
                             ExitCode::FAILURE
+                        }
+                    }
+                }
+                "eval" => {
+                    let sub = std::env::args().nth(2).unwrap_or_default();
+                    let n: Option<usize> = std::env::args().nth(3).and_then(|s| s.parse().ok());
+                    let path = emailhelper::eval::eval_dir(&app).join("dataset.jsonl");
+                    match sub.as_str() {
+                        "generate" => {
+                            let items = emailhelper::eval::dataset::generate(&app, n.unwrap_or(500)).await;
+                            match emailhelper::eval::write_dataset(&path, &items) {
+                                Ok(()) => {
+                                    println!("{} questions written to {}", items.len(), path.display());
+                                    ExitCode::SUCCESS
+                                }
+                                Err(e) => {
+                                    eprintln!("could not write the dataset: {e}");
+                                    ExitCode::FAILURE
+                                }
+                            }
+                        }
+                        "run" => {
+                            let mut items = match emailhelper::eval::read_dataset(&path) {
+                                Ok(i) if !i.is_empty() => i,
+                                _ => {
+                                    eprintln!("no dataset at {}; run `emailhelper eval generate` first", path.display());
+                                    return ExitCode::from(2);
+                                }
+                            };
+                            if let Some(n) = n {
+                                items.truncate(n);
+                            }
+                            match emailhelper::eval::run(&app, &items).await {
+                                Ok((rep, out)) => {
+                                    print!("{}", emailhelper::eval::markdown(&rep));
+                                    println!("\nReport: {}", out.display());
+                                    ExitCode::SUCCESS
+                                }
+                                Err(e) => {
+                                    eprintln!("evaluation failed: {e}");
+                                    ExitCode::FAILURE
+                                }
+                            }
+                        }
+                        _ => {
+                            eprintln!("usage: emailhelper eval generate [N] | eval run [N]");
+                            ExitCode::from(2)
                         }
                     }
                 }

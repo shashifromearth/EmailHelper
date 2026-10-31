@@ -87,6 +87,10 @@ impl Builder {
             ("RESEARCH_REMOTE_BOARDS".into(), "none".into()),
             // tests trigger discovery runs themselves
             ("RESEARCH_SCHEDULE_ENABLED".into(), "false".into()),
+            // never query the user's real knowledge service from tests
+            ("KNOWLEDGE_SERVICE_URL".into(), "none".into()),
+            // tests count LLM calls exactly: no background judging
+            ("EVAL_LIVE_SAMPLE".into(), "0".into()),
         ]);
         env.extend(self.env);
         let cfg = Config::from_lookup(|k| env.get(k).cloned()).expect("config");

@@ -10,6 +10,7 @@ pub struct Metrics {
     pub registry: Registry,
     pub emails_processed_total: IntCounterVec,
     pub email_duplicates_total: IntCounter,
+    pub emails_excluded_total: IntCounter,
     pub drafts_created_total: IntCounterVec,
     pub validation_failures_total: IntCounter,
     pub agent_failures_total: IntCounterVec,
@@ -93,6 +94,11 @@ impl Metrics {
                 &r,
                 "email_duplicates_total",
                 "Duplicate email submissions ignored",
+            ),
+            emails_excluded_total: counter(
+                &r,
+                "emails_excluded_total",
+                "Emails dropped because the sender is excluded (EH_EXCLUDED_SENDERS).",
             ),
             drafts_created_total: counter_vec(
                 &r,

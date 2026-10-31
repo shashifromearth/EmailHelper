@@ -334,8 +334,8 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
         if let Err(e) = app
             .db
             .call(move |c| {
-                crate::db::set_setting(c, LAST_RUN_DATE, &today)?;
-                crate::db::set_setting(c, LAST_RUN_AT, &at)
+                crate::db::settings::set(c, LAST_RUN_DATE, &today)?;
+                crate::db::settings::set(c, LAST_RUN_AT, &at)
             })
             .await
         {
@@ -449,7 +449,7 @@ pub const LAST_RUN_AT: &str = "research.last_run_at";
 pub async fn ran_today(app: &App) -> (bool, Option<String>) {
     let last = app
         .db
-        .call(|c| crate::db::get_setting(c, LAST_RUN_DATE))
+        .call(|c| crate::db::settings::get(c, LAST_RUN_DATE))
         .await
         .ok()
         .flatten();

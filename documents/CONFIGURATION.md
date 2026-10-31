@@ -27,6 +27,8 @@ cloud API keys never cause a failure: the agent falls back to local Ollama.
 | `EH_MAX_ATTACHMENT_BYTES` | `26214400` | Attachments above this size are flagged in the audit log. Attachment content is never ingested. |
 | `EH_WORKFLOW_VERSION` | `1` | Part of the idempotency key; bump it to re-process mail. |
 | `EH_MAX_RETRIES` | `3` | Attempts per email job before it is marked dead. |
+| `EH_EXCLUDED_SENDERS` | — | Senders that never enter the system, as addresses (`alerts@paytm.com`) and/or domains (`hdfcbank.com` or `@hdfcbank.com`, subdomains included), separated by `;` or `,`. The Thunderbird extension skips them before reading the message, and the agent drops them before storing or classifying anything. Only a counter (`emails_excluded_total`) records them. |
+| `EVAL_LIVE_SAMPLE` | `0.25` | Share of real drafts scored in the background by the LLM judge (groundedness, relevance, faithfulness). The private values are masked first. The 7-day averages appear as `draft_quality_7d` in `GET /api/v1/status`. `0` turns it off. |
 | `EH_MAX_EMAIL_AGE_HOURS` | `72` | Mail older than this (for example a bulk pass over old unread messages) is recorded and checked for job signals by rules, but gets no LLM call and no draft. `0` turns the limit off. |
 
 ## LLM
@@ -116,6 +118,43 @@ Browser worker settings (read by `browser-worker/`): `BROWSER_WORKER_HOST`,
 
 People, mailboxes, purposes, private facts and resumes are described in
 [KNOWLEDGE.md](KNOWLEDGE.md).
+
+## Knowledge service (RAG)
+
+| Variable | Default | Description |
+|---|---|---|
+| `KNOWLEDGE_SERVICE_ADDR` | `127.0.0.1:7820` | Where the knowledge service listens (loopback only unless `KNOWLEDGE_SERVICE_ALLOW_REMOTE=true`). |
+| `KNOWLEDGE_SERVICE_URL` | `http://127.0.0.1:7820` | Where the agent finds it; `none` = local keyword search only. |
+| `KNOWLEDGE_SERVICE_TOKEN` | `EH_API_TOKEN` | Shared token, sent as `x-knowledge-token`. |
+| `KNOWLEDGE_DB` | `data/knowledge.db` | Chunks, keyword index and vectors. |
+| `RAG_GEMINI_ENABLED` / `RAG_GEMINI_MODEL` | `true` / `gemini-embedding-001` | Gemini embeddings (needs `GEMINI_API_KEY`). |
+| `RAG_LOCAL_MODEL` | `nomic-embed-text` | Local Ollama embedding model (`ollama pull nomic-embed-text`). |
+| `RAG_ETL_CHECK_HOURS` | `6` | The ETL runs once a day; this is how often it checks whether today's run happened. |
+
+## RAG evaluation
+
+```bash
+emailhelper eval generate 500
+```
+
+```bash
+emailhelper eval run
+```
+
+`generate` builds `data/eval/dataset.jsonl` from the knowledge folder:
+- **facts:** a recruiter asks for a known fact;
+- **grounded:** a question written by the LLM from a real chunk, with that
+  chunk's file expected among the retrieved ones;
+- **isolation:** asked about another person;
+- **privacy:** PAN, DOB and similar; the private values are checked locally
+  and never sent to a model;
+- **unanswerable:** the answer must not be invented.
+
+`run` answers every question through the agent's retrieval. An LLM judge
+scores groundedness, relevance, faithfulness and accuracy, alongside the
+retrieval hit rate and safety violations. Reports are written to
+`data/eval/report-*.json|md`. With the free Groq tier a full run of 500
+takes hours, because of rate limits; `eval run 50` runs a sample.
 
 
 See [API.md §4](API.md#4-knowledge-directory-eh_knowledge_dir-default-knowledge).

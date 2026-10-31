@@ -178,3 +178,16 @@ describe("ingest", () => {
     assert.deepEqual(out, [1, 2]);
   });
 });
+
+import { isExcludedSender } from "../src/ingest.js";
+
+test("excluded senders: addresses and domains, subdomains included", () => {
+  const list = ["hdfcbank.com", "@icicibank.com", "alerts@paytm.com"];
+  assert.equal(isExcludedSender(list, "HDFC Bank <InstaAlerts@hdfcbank.com>"), true);
+  assert.equal(isExcludedSender(list, "noreply@mail.hdfcbank.com"), true);
+  assert.equal(isExcludedSender(list, "x@icicibank.com"), true);
+  assert.equal(isExcludedSender(list, "alerts@paytm.com"), true);
+  assert.equal(isExcludedSender(list, "support@paytm.com"), false);
+  assert.equal(isExcludedSender(list, "me@nothdfcbank.com"), false);
+  assert.equal(isExcludedSender([], "a@hdfcbank.com"), false);
+});

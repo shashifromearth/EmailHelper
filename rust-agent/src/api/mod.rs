@@ -84,6 +84,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/questions/{id}/answer", post(handlers::answer_question))
         .route("/recruiters", get(handlers::list_recruiters))
         .route("/research/run", post(handlers::run_research))
+        .route("/knowledge/reindex", post(handlers::knowledge_reindex))
+        .route("/knowledge/status", get(handlers::knowledge_status))
         .route("/audit", get(handlers::audit_log))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_token));
 

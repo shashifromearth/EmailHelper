@@ -1,0 +1,37 @@
+[package]
+name = "knowledge-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Knowledge service: structure-aware ETL, embeddings and hybrid search over the knowledge folder"
+
+[lib]
+name = "knowledge_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "knowledge-service"
+path = "src/main.rs"
+
+[dependencies]
+eh-knowledge = { path = "../knowledge-core" }
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dotenvy = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlite-vec = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "fs", "net"] }
+tower-http = { version = "0.6", default-features = false, features = ["cors", "limit", "timeout", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", default-features = false, features = ["util"] }
+http-body-util = "0.1"
+wiremock = "0.6"
