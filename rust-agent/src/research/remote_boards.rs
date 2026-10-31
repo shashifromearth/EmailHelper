@@ -26,7 +26,8 @@ fn strings(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// RFC 3339, "2026-10-17T16:04:29" (UTC), RFC 2822 or unix seconds.
+/// RFC 3339, "2026-10-17T16:04:29[.0000000]" (UTC), RFC 2822, unix
+/// seconds, or a bare date ("2026-10-17", "October 17, 2026", "Oct 17, 2026").
 pub fn parse_date(v: &Value) -> Option<DateTime<Utc>> {
     if let Some(n) = v.as_i64() {
         let secs = if n > 100_000_000_000 { n / 1000 } else { n };
@@ -38,9 +39,16 @@ pub fn parse_date(v: &Value) -> Option<DateTime<Utc>> {
         .or_else(|_| DateTime::parse_from_rfc2822(t).map(|d| d.with_timezone(&Utc)))
         .ok()
         .or_else(|| {
-            NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S")
-                .or_else(|_| NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S"))
-                .ok()
+            ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]
+                .iter()
+                .find_map(|f| NaiveDateTime::parse_from_str(t, f).ok())
+                .map(|n| Utc.from_utc_datetime(&n))
+        })
+        .or_else(|| {
+            ["%Y-%m-%d", "%B %d, %Y", "%b %d, %Y"]
+                .iter()
+                .find_map(|f| chrono::NaiveDate::parse_from_str(t, f).ok())
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
                 .map(|n| Utc.from_utc_datetime(&n))
         })
 }

@@ -188,6 +188,53 @@ pub struct ResearchConfig {
     pub check_interval_hours: u64,
     /// Run the daily scheduler (off in tests that trigger runs themselves).
     pub schedule_enabled: bool,
+    /// Role types ranked first among kept jobs (contract / freelance / consultant).
+    pub preferred_work_types: Vec<String>,
+    /// Points added to a job's rank for being remote, and again for being a
+    /// preferred role type (the stored match score is unchanged).
+    pub priority_boost: i64,
+    /// Official job APIs and web-search APIs (RESEARCH_SOURCES).
+    pub apis: ApiSourcesConfig,
+}
+
+/// Job and search APIs read by discovery. A source without its key is skipped.
+#[derive(Clone, Debug)]
+pub struct ApiSourcesConfig {
+    /// adzuna, jooble, careerjet, arbeitnow, themuse, google_cse, brave.
+    pub sources: Vec<String>,
+    /// Keywords the job APIs are queried with (role + stack).
+    pub queries: Vec<String>,
+    /// Search-API queries combine a role phrase, a stack word and a job site.
+    pub search_roles: Vec<String>,
+    pub search_stacks: Vec<String>,
+    /// linkedin, glassdoor, naukri, wellfound, indeed, instahyre, hirist, foundit, iimjobs.
+    pub search_sites: Vec<String>,
+    /// Requests per run across all API sources, and per source.
+    pub max_requests: usize,
+    pub max_requests_per_source: usize,
+    /// Pause between requests to one API (None = each API's own default).
+    pub delay_ms: Option<u64>,
+    pub adzuna_app_id: Option<String>,
+    pub adzuna_app_key: Option<String>,
+    pub adzuna_countries: Vec<String>,
+    pub adzuna_api_base: String,
+    pub jooble_api_key: Option<String>,
+    pub jooble_locations: Vec<String>,
+    pub jooble_api_base: String,
+    pub careerjet_affid: Option<String>,
+    pub careerjet_locales: Vec<String>,
+    pub careerjet_user_ip: String,
+    pub careerjet_api_base: String,
+    pub arbeitnow_pages: usize,
+    pub arbeitnow_api_base: String,
+    pub themuse_api_key: Option<String>,
+    pub themuse_pages: usize,
+    pub themuse_api_base: String,
+    pub google_cse_key: Option<String>,
+    pub google_cse_cx: Option<String>,
+    pub google_cse_api_base: String,
+    pub brave_search_key: Option<String>,
+    pub brave_search_api_base: String,
 }
 
 #[derive(Clone, Debug)]
@@ -235,6 +282,23 @@ pub const DEFAULT_SEARCH_TERMS: &[&str] = &[
     "Remote AI Jobs",
     "India AI Jobs",
     "GenAI Architect",
+];
+
+/// Keywords the job APIs (Adzuna, Jooble, Careerjet) are queried with.
+pub const DEFAULT_API_QUERIES: &[&str] = &[
+    "python developer",
+    "python architect",
+    ".net developer",
+    "c# developer",
+    "java developer",
+    "java architect",
+    "golang developer",
+    "rust developer",
+    "generative ai engineer",
+    "agentic ai",
+    "genai architect",
+    "solution architect",
+    "engineering manager",
 ];
 
 impl Config {
@@ -424,12 +488,78 @@ impl Config {
             applicant_country: s("RESEARCH_APPLICANT_COUNTRY"),
             tech_stack: list_or_default(
                 s("RESEARCH_TECH_STACK"),
-                &["python", "c#", ".net", "java", "genai", "agentic ai"],
+                &["python", "c#", ".net", "java", "rust", "go", "genai", "agentic ai"],
             ),
-            work_types: list_or_default(s("RESEARCH_WORK_TYPES"), &["contract", "freelance", "consultant"]),
-            require_remote: b("RESEARCH_REQUIRE_REMOTE", true),
+            work_types: list_or_default(s("RESEARCH_WORK_TYPES"), &[]),
+            require_remote: b("RESEARCH_REQUIRE_REMOTE", false),
             check_interval_hours: num("RESEARCH_CHECK_INTERVAL_HOURS", 4)?.clamp(1, 24),
             schedule_enabled: b("RESEARCH_SCHEDULE_ENABLED", true),
+            preferred_work_types: list_or_default(
+                s("RESEARCH_PREFERRED_WORK_TYPES"),
+                &["contract", "freelance", "consultant"],
+            ),
+            priority_boost: num("RESEARCH_PRIORITY_BOOST", 10)?.min(100) as i64,
+            apis: ApiSourcesConfig {
+                sources: list_or_default(s("RESEARCH_SOURCES"), crate::research::job_apis::SOURCES),
+                queries: list_or_default(s("RESEARCH_API_QUERIES"), DEFAULT_API_QUERIES),
+                search_roles: list_or_default(
+                    s("RESEARCH_SEARCH_ROLES"),
+                    &["developer", "senior engineer", "architect", "lead", "engineering manager"],
+                ),
+                search_stacks: list_or_default(
+                    s("RESEARCH_SEARCH_STACKS"),
+                    &["python", ".net", "java", "golang", "rust", "generative ai", "agentic ai"],
+                ),
+                search_sites: list_or_default(
+                    s("RESEARCH_SEARCH_SITES"),
+                    crate::research::search_apis::SITES,
+                ),
+                max_requests: num("RESEARCH_API_MAX_REQUESTS", 250)? as usize,
+                max_requests_per_source: num("RESEARCH_API_MAX_REQUESTS_PER_SOURCE", 40)? as usize,
+                delay_ms: match s("RESEARCH_API_DELAY_MS") {
+                    None => None,
+                    Some(_) => Some(num("RESEARCH_API_DELAY_MS", 0)?),
+                },
+                adzuna_app_id: s("ADZUNA_APP_ID"),
+                adzuna_app_key: s("ADZUNA_APP_KEY"),
+                adzuna_countries: list_or_default(
+                    s("ADZUNA_COUNTRIES"),
+                    &["in", "us", "gb", "de", "sg", "nl"],
+                ),
+                adzuna_api_base: s_or("ADZUNA_API_BASE", "https://api.adzuna.com/v1/api/jobs"),
+                jooble_api_key: s("JOOBLE_API_KEY"),
+                jooble_locations: list_or_default(s("JOOBLE_LOCATIONS"), &["Remote", "India"]),
+                jooble_api_base: s_or("JOOBLE_API_BASE", "https://jooble.org/api"),
+                careerjet_affid: s("CAREERJET_AFFID"),
+                careerjet_locales: list_or_default(
+                    s("CAREERJET_LOCALES"),
+                    &["en_IN", "en_AE", "en_SG", "en_GB", "en_US"],
+                ),
+                careerjet_user_ip: s_or("CAREERJET_USER_IP", "127.0.0.1"),
+                careerjet_api_base: s_or(
+                    "CAREERJET_API_BASE",
+                    "http://public.api.careerjet.net/search",
+                ),
+                arbeitnow_pages: num("ARBEITNOW_PAGES", 3)? as usize,
+                arbeitnow_api_base: s_or(
+                    "ARBEITNOW_API_BASE",
+                    "https://www.arbeitnow.com/api/job-board-api",
+                ),
+                themuse_api_key: s("THEMUSE_API_KEY"),
+                themuse_pages: num("THEMUSE_PAGES", 5)? as usize,
+                themuse_api_base: s_or("THEMUSE_API_BASE", "https://www.themuse.com/api/public/jobs"),
+                google_cse_key: s("GOOGLE_CSE_KEY"),
+                google_cse_cx: s("GOOGLE_CSE_CX"),
+                google_cse_api_base: s_or(
+                    "GOOGLE_CSE_API_BASE",
+                    "https://www.googleapis.com/customsearch/v1",
+                ),
+                brave_search_key: s("BRAVE_SEARCH_KEY"),
+                brave_search_api_base: s_or(
+                    "BRAVE_SEARCH_API_BASE",
+                    "https://api.search.brave.com/res/v1/web/search",
+                ),
+            },
         };
 
         let max_concurrency = num("EH_MAX_CONCURRENCY", 10)?.clamp(1, 256) as usize;

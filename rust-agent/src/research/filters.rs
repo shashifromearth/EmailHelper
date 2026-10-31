@@ -1,6 +1,8 @@
-//! What the research agent keeps: fresh postings, open to applicants in the
-//! person's country, remote/distributed or contract/freelance/consulting,
-//! in the person's tech stack.
+//! What the research agent keeps: fresh postings in the person's tech stack,
+//! open to applicants in the person's country. Remote jobs anywhere that
+//! accepts them; on-site/hybrid jobs in that country, or abroad when the
+//! employer offers visa sponsorship / relocation. Remote and
+//! contract/freelance/consulting roles rank first (`priority`).
 
 use chrono::{DateTime, Utc};
 
@@ -27,16 +29,19 @@ fn stack_words(term: &str) -> Vec<&'static str> {
         "python" => vec!["python", "django", "fastapi", "flask"],
         "c#" | "csharp" => vec!["c#", "csharp", ".net", "dotnet", "asp.net"],
         ".net" | "dotnet" => vec![".net", "dotnet", "asp.net", "c#"],
-        "java" => vec!["java", "spring boot", "spring", "kotlin"],
-        "genai" | "gen ai" | "generative ai" => {
-            vec!["genai", "gen ai", "generative ai", "llm", "llms", "large language model", "rag", "openai", "langchain"]
-        }
-        "agentic ai" | "agentic" | "ai agents" => {
-            vec!["agentic", "ai agent", "ai agents", "multi-agent", "langgraph", "crewai", "autogen", "mcp"]
-        }
+        "java" => vec!["java", "spring boot", "spring", "kotlin", "j2ee", "jvm"],
+        "genai" | "gen ai" | "generative ai" => vec![
+            "genai", "gen ai", "generative ai", "llm", "llms", "large language model", "rag", "openai", "langchain",
+            "ai engineer", "ai architect", "llmops", "prompt engineering", "vector database",
+        ],
+        "agentic ai" | "agentic" | "ai agents" => vec![
+            "agentic", "ai agent", "ai agents", "multi-agent", "langgraph", "crewai", "autogen", "mcp",
+            "semantic kernel", "autonomous agents",
+        ],
         "llm" => vec!["llm", "llms", "large language model"],
-        "rust" => vec!["rust"],
-        "go" | "golang" => vec!["golang"],
+        "rust" => vec!["rust", "rustlang"],
+        // "go" alone is an everyday word; only clear uses count.
+        "go" | "golang" => vec!["golang", "go developer", "go engineer", "go programmer", "go/golang", "go (golang)"],
         _ => vec![],
     }
 }
@@ -104,7 +109,38 @@ const RESTRICTED: &[&str] = &[
     "emea only", "latam only", "must be located in europe", "must be based in europe", "right to work in the uk",
     "eligible to work in the eu", "must reside in canada", "located in the americas",
 ];
-/// Why a job isn't open to applicants in `country`, if it isn't.
+/// Citizenship / clearance rules: never open to foreign applicants.
+const CITIZENS_ONLY: &[&str] = &[
+    "us citizens", "u.s. citizens", "us citizenship", "green card", "security clearance", "citizenship is required",
+    "must be a citizen",
+];
+/// Phrases saying the employer won't sponsor a work visa.
+const NO_SPONSORSHIP: &[&str] = &[
+    "no visa sponsorship", "not offer visa sponsorship", "not provide visa sponsorship", "unable to sponsor",
+    "not able to sponsor", "cannot sponsor", "can't sponsor", "will not sponsor", "won't sponsor", "does not sponsor",
+    "do not sponsor", "no sponsorship", "without sponsorship", "sponsorship is not available",
+    "sponsorship not available",
+];
+/// Phrases saying applicants from other countries are welcome: visa
+/// sponsorship, relocation help, or an explicit invitation.
+pub const OPEN_ABROAD: &[&str] = &[
+    "visa sponsorship", "sponsor your visa", "sponsor visas", "sponsor work visa", "will sponsor", "we sponsor",
+    "sponsorship available", "sponsorship provided", "blue card", "relocation assistance", "relocation support",
+    "relocation package", "relocation bonus", "relocation allowance", "relocation help", "help you relocate",
+    "relocation is provided", "relocation provided", "relocation offered", "relocation is offered",
+    "relocation is available", "relocation available", "international applicants", "international candidates",
+    "applicants from any country", "candidates from any country", "open to applicants worldwide",
+    "open to candidates worldwide", "from anywhere in the world",
+];
+
+/// Does the posting welcome applicants who need a visa / relocation?
+pub fn open_to_foreign_applicants(desc_lower: &str) -> bool {
+    !NO_SPONSORSHIP.iter().any(|p| desc_lower.contains(p)) && OPEN_ABROAD.iter().any(|p| desc_lower.contains(p))
+}
+
+/// Why a job isn't open to applicants in `country`, if it isn't. Remote
+/// jobs must accept that country (or anywhere); on-site / hybrid jobs must be
+/// in it, or offer visa sponsorship / relocation.
 pub fn eligibility_problem(j: &RawJob, country: &str) -> Option<String> {
     let c = country.to_lowercase();
     let region = j
@@ -118,6 +154,10 @@ pub fn eligibility_problem(j: &RawJob, country: &str) -> Option<String> {
         contains_word(t, &c)
             || (c == "india" && crate::knowledge::profile::countries_in(t).contains(&"India"))
     };
+    if let Some(p) = CITIZENS_ONLY.iter().find(|p| desc.contains(*p)) {
+        return Some(format!("description says \"{p}\""));
+    }
+    let welcomes_foreigners = open_to_foreign_applicants(&desc);
     // What the region says beyond "remote": any named place that isn't the
     // applicant's country (or worldwide / APAC) limits who may apply.
     let named_place: String = region
@@ -136,10 +176,15 @@ pub fn eligibility_problem(j: &RawJob, country: &str) -> Option<String> {
     } else {
         Some(false)
     };
-    if region_ok == Some(false) {
-        return Some(format!("only for applicants in {}", j.region.as_deref().or(j.details.location.as_deref()).unwrap_or("?")));
+    let place = || j.region.as_deref().or(j.details.location.as_deref()).unwrap_or("?").to_string();
+    if region_ok == Some(false) && !welcomes_foreigners {
+        return Some(if is_remote(j) {
+            format!("only for applicants in {}", place())
+        } else {
+            format!("on-site in {} without visa sponsorship or relocation", place())
+        });
     }
-    if region_ok != Some(true) || !names_country(&desc) {
+    if (region_ok != Some(true) || !names_country(&desc)) && !welcomes_foreigners {
         if let Some(p) = RESTRICTED.iter().find(|p| desc.contains(*p)) {
             return Some(format!("description says \"{p}\""));
         }
@@ -202,15 +247,46 @@ pub fn engagement_ok(j: &RawJob, types: &[String]) -> bool {
     })
 }
 
-/// Engineering / technical consulting titles (not design, sales, support…).
+/// Engineering / technical consulting titles (not design, sales, support…):
+/// developers, engineers, architects, and engineering leads / managers /
+/// directors.
 pub fn engineering_title(title: &str) -> bool {
     let t = title.to_lowercase();
-    [
+    let direct = [
         "engineer", "developer", "dev", "architect", "programmer", "consultant", "scientist", "sre", "devops",
         "full stack", "full-stack", "fullstack", "backend", "back-end", "technical lead", "tech lead", "cto",
+        "engineering manager", "director of engineering", "head of engineering", "vp engineering",
+        "vp of engineering", "software development manager",
     ]
     .iter()
-    .any(|w| contains_word(&t, w))
+    .any(|w| contains_word(&t, w));
+    // "Lead", "Manager", "Director", "Head" count when the title is technical.
+    let leader = ["lead", "manager", "director", "head", "principal", "staff"]
+        .iter()
+        .any(|w| contains_word(&t, w));
+    let technical = [
+        "engineering", "software", "technology", "technical", "platform", "development", "ai", "ml", "genai",
+        "python", "java", ".net", "c#", "golang", "rust", "cloud", "data",
+    ]
+    .iter()
+    .any(|w| has(&t, w));
+    direct || (leader && technical)
+}
+
+/// How far up a kept job ranks: `boost` for remote, and again for a
+/// preferred role type. Returns the points and what earned them.
+pub fn priority(j: &RawJob, preferred_types: &[String], boost: i64) -> (i64, Vec<String>) {
+    let mut why = Vec::new();
+    if is_remote(j) {
+        why.push("remote".to_string());
+    }
+    if let Some(t) = preferred_types
+        .iter()
+        .find(|t| engagement_ok(j, std::slice::from_ref(*t)))
+    {
+        why.push(t.trim().to_lowercase());
+    }
+    (boost * why.len() as i64, why)
 }
 
 /// Keep the job, or say why not.
@@ -346,6 +422,80 @@ mod tests {
     fn javascript_is_not_java() {
         let j = raw("Frontend Engineer", Some("Worldwide"), "React and JavaScript", None, 1);
         assert!(stack_hits(&j, &crit().stack).is_empty());
+    }
+
+    /// The new defaults: any workplace, any role type.
+    fn broad() -> Criteria {
+        Criteria {
+            stack: ["python", "c#", ".net", "java", "rust", "go", "genai", "agentic ai"].iter().map(|s| s.to_string()).collect(),
+            work_types: Vec::new(),
+            require_remote: false,
+            ..crit()
+        }
+    }
+
+    fn onsite(title: &str, region: &str, desc: &str) -> RawJob {
+        let mut j = raw(title, Some(region), desc, Some("full_time"), 2);
+        j.details.remote = Some("onsite".into());
+        j
+    }
+
+    #[test]
+    fn onsite_jobs_in_india_or_with_sponsorship_are_kept() {
+        let now = Utc::now();
+        let c = broad();
+        assert!(check(&onsite("Senior Python Developer", "Bengaluru, Karnataka, India", "Python"), &c, now).is_ok());
+        assert!(check(&onsite("Java Architect", "Pune", "Java, Spring"), &c, now).is_ok(), "Pune is in India");
+        let sponsored = onsite("Java Architect", "Berlin, Germany", "Java. We offer visa sponsorship and relocation support.");
+        assert!(check(&sponsored, &c, now).is_ok());
+        let welcome = onsite("Rust Engineer", "Dubai, UAE", "Rust. International applicants welcome.");
+        assert!(check(&welcome, &c, now).is_ok());
+        let local = onsite("Python Engineer", "Munich, Germany", "Python services");
+        assert_eq!(
+            check(&local, &c, now).unwrap_err(),
+            "on-site in Munich, Germany without visa sponsorship or relocation"
+        );
+        let refused = onsite("Python Engineer", "London, UK", "Python. We do not sponsor visas. Relocation support available.");
+        assert!(check(&refused, &c, now).is_err(), "no sponsorship wins over relocation help");
+        let citizens = onsite("Python Engineer", "Austin, TX", "Python. Visa sponsorship available. US citizens only.");
+        assert!(check(&citizens, &c, now).unwrap_err().contains("us citizens"));
+        // remote jobs restricted to another country are still dropped
+        assert!(check(&raw("Python Dev", Some("USA"), "", None, 1), &c, now).unwrap_err().contains("only for applicants in USA"));
+    }
+
+    #[test]
+    fn leads_managers_and_directors_count() {
+        for t in [
+            "Engineering Manager, AI Platform", "Director of Engineering", "Principal Software Engineer", "Lead - Python",
+            "Head of AI", "Staff Data Engineer", "Solution Architect", "Enterprise Architect (GenAI)", "Golang Developer",
+        ] {
+            assert!(engineering_title(t), "{t}");
+        }
+        for t in ["Sales Manager", "Art Director", "Head of Marketing", "Account Lead"] {
+            assert!(!engineering_title(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn go_and_rust_stacks() {
+        let c = broad();
+        let go = raw("Backend Developer", Some("Worldwide"), "Golang microservices. Golang, gRPC.", None, 1);
+        assert_eq!(stack_hits(&go, &c.stack), vec!["go"]);
+        let not_go = raw("Backend Developer", Some("Worldwide"), "Ready to go? Let's go build things.", None, 1);
+        assert!(stack_hits(&not_go, &c.stack).is_empty(), "'go' alone is not Go");
+        let rust = raw("Rust Engineer", Some("Worldwide"), "", None, 1);
+        assert_eq!(stack_hits(&rust, &c.stack), vec!["rust"]);
+    }
+
+    #[test]
+    fn remote_and_contract_rank_first() {
+        let types: Vec<String> = ["contract", "freelance", "consultant"].iter().map(|s| s.to_string()).collect();
+        let both = raw("Python Developer", Some("Worldwide"), "", Some("contract"), 1);
+        assert_eq!(priority(&both, &types, 10), (20, vec!["remote".to_string(), "contract".to_string()]));
+        let freelance = onsite("Python Developer (Freelance)", "Pune", "");
+        assert_eq!(priority(&freelance, &types, 10), (10, vec!["freelance".to_string()]));
+        let office = onsite("Python Developer", "Pune", "");
+        assert_eq!(priority(&office, &types, 10).0, 0);
     }
 
     impl RawJob {

@@ -390,6 +390,9 @@ async fn remote_boards_keep_only_fresh_india_open_stack_jobs() {
         .env("RESEARCH_REMOTE_BOARDS", "remotive")
         .env("RESEARCH_REMOTIVE_URL", &format!("{}/remotive", src.uri()))
         .env("RESEARCH_APPLICANT_COUNTRY", "India")
+        // the strict setup: remote contract / freelance / consulting roles only
+        .env("RESEARCH_REQUIRE_REMOTE", "true")
+        .env("RESEARCH_WORK_TYPES", "contract;freelance;consultant")
         .env("TELEGRAM_ENABLED", "true")
         .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
         .env("TELEGRAM_CHAT_ID", "1")
@@ -412,4 +415,120 @@ async fn remote_boards_keep_only_fresh_india_open_stack_jobs() {
     // the three full-time jobs (USA-only, frontend, "located in the US") fail the role-type rule first
     assert!(summary.contains("3 not a contract / consultant / freelance role"), "{summary}");
     assert!(summary.contains("remote · contract/freelance/consultant"), "{summary}");
+}
+
+#[tokio::test]
+async fn job_and_search_apis_keep_india_and_sponsored_jobs_remote_contract_first() {
+    let src = MockServer::start().await;
+    let tg = telegram_mock().await;
+    let fresh = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+    Mock::given(method("GET"))
+        .and(path("/adzuna/in/search/1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": [
+            {"id": "1", "title": "Senior Python Developer", "company": {"display_name": "Acme"},
+             "location": {"display_name": "Bengaluru, Karnataka", "area": ["India", "Karnataka", "Bengaluru"]},
+             "created": fresh, "redirect_url": "https://www.adzuna.in/land/ad/1",
+             "description": "On-site in our Bengaluru office. Python, Django.", "contract_time": "full_time"}
+        ]})))
+        .mount(&src)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/adzuna/de/search/1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": [
+            {"id": "2", "title": "Java Architect", "company": {"display_name": "Initech"},
+             "location": {"display_name": "Berlin", "area": ["Deutschland", "Berlin"]}, "created": fresh,
+             "redirect_url": "https://www.adzuna.de/land/ad/2",
+             "description": "On-site in Berlin. Java, Spring Boot. Visa sponsorship and relocation assistance provided."},
+            {"id": "3", "title": "Python Engineer", "company": {"display_name": "Globex"},
+             "location": {"display_name": "Munich", "area": ["Deutschland", "Munich"]}, "created": fresh,
+             "redirect_url": "https://www.adzuna.de/land/ad/3", "description": "On-site in Munich. Python, Python."}
+        ]})))
+        .mount(&src)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/jooble/jkey"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jobs": [
+            {"id": 10, "title": "Senior Python Developer", "company": "Acme Pvt Ltd", "location": "Bengaluru",
+             "snippet": "Python", "link": "https://jooble.org/desc/10", "updated": fresh},
+            {"id": 11, "title": "Staff AI Engineer (Contract)", "company": "Hooli", "location": "Remote",
+             "snippet": "Contract role, worldwide. Rust, Python, LLMs, RAG, PyTorch, Kubernetes.", "type": "Contract",
+             "link": "https://jooble.org/desc/11", "updated": fresh},
+            {"id": 12, "title": ".NET Developer", "company": "US Co", "location": "Remote",
+             "snippet": "C# and .NET services. You must be located in the US.", "link": "https://jooble.org/desc/12",
+             "updated": fresh}
+        ]})))
+        .mount(&src)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/brave"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"web": {"results": [
+            {"title": "Umbrella hiring Rust Engineer in India (Remote) | LinkedIn",
+             "url": "https://in.linkedin.com/jobs/view/rust-engineer-at-umbrella-4099999999",
+             "description": "Remote. Rust, Python, LLMs, RAG, Kubernetes.", "age": "5 hours ago"}
+        ]}})))
+        .mount(&src)
+        .await;
+    let a = builder()
+        .env("RESEARCH_ENABLED", "true")
+        .env("RESEARCH_APPLICANT_COUNTRY", "India")
+        .env("RESEARCH_SOURCES", "adzuna;jooble;brave")
+        .env("RESEARCH_API_DELAY_MS", "0")
+        .env("RESEARCH_API_QUERIES", "python developer")
+        .env("ADZUNA_APP_ID", "id")
+        .env("ADZUNA_APP_KEY", "key")
+        .env("ADZUNA_COUNTRIES", "in;de")
+        .env("ADZUNA_API_BASE", &format!("{}/adzuna", src.uri()))
+        .env("JOOBLE_API_KEY", "jkey")
+        .env("JOOBLE_LOCATIONS", "Remote")
+        .env("JOOBLE_API_BASE", &format!("{}/jooble", src.uri()))
+        .env("BRAVE_SEARCH_KEY", "bkey")
+        .env("BRAVE_SEARCH_API_BASE", &format!("{}/brave", src.uri()))
+        .env("RESEARCH_SEARCH_ROLES", "engineer")
+        .env("RESEARCH_SEARCH_STACKS", "rust")
+        .env("RESEARCH_SEARCH_SITES", "linkedin")
+        .env("TELEGRAM_ENABLED", "true")
+        .env("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+        .env("TELEGRAM_CHAT_ID", "1")
+        .env("TELEGRAM_API_BASE", &tg.uri())
+        .start()
+        .await;
+    a.post("/api/v1/research/run", &json!({})).await;
+    let summary = wait_for("discovery summary", T, || async {
+        sent_texts(&tg).await.into_iter().find(|t| t.contains("Daily Job Discovery"))
+    })
+    .await;
+    let jobs = a.app.db.call(|c| jdb::list_jobs(c, 50, None)).await.unwrap();
+    let mut titles: Vec<&str> = jobs.iter().map(|j| j.details.title.as_str()).collect();
+    titles.sort();
+    // on-site in India, on-site abroad with visa + relocation, remote contract, LinkedIn remote
+    assert_eq!(
+        titles,
+        vec!["Java Architect", "Rust Engineer", "Senior Python Developer", "Staff AI Engineer (Contract)"],
+        "{summary}"
+    );
+    assert!(summary.contains("1 duplicate on another board"), "{summary}");
+    assert!(summary.contains("1 on-site abroad without visa sponsorship or relocation"), "{summary}");
+    assert!(summary.contains("1 not open to applicants in your country"), "{summary}");
+    assert!(summary.contains("Ranked first: remote/contract/freelance/consultant"), "{summary}");
+    assert!(summary.contains("Staff AI Engineer (Contract) — Hooli (remote, contract)"), "{summary}");
+    // the remote contract job outranks the remote-only one
+    let pos = |t: &str| summary.find(t).unwrap_or_else(|| panic!("{t} missing: {summary}"));
+    assert!(pos("Staff AI Engineer (Contract)") < pos("Rust Engineer"), "{summary}");
+    // LinkedIn postings found by search go to the browser extension, not the agent
+    assert!(summary.contains("https://www.linkedin.com/jobs/view/4099999999/"), "{summary}");
+    assert!(summary.contains("linkedin posting: apply with the browser extension"), "{summary}");
+
+    // The report hands every kept job on with its details (here: a second run, nothing new).
+    let report = emailhelper::research::discovery::run(&a.app).await.unwrap();
+    assert_eq!(report.kept.len(), 4);
+    assert!(report.kept.iter().all(|k| !k.is_new && k.posted_at.is_some() && k.url.is_some()));
+    let first = &report.kept[0];
+    assert_eq!(first.title, "Staff AI Engineer (Contract)", "ranked first");
+    assert_eq!(first.source, "jooble");
+    assert_eq!(first.employment_type.as_deref(), Some("Contract"));
+    assert_eq!(first.remote.as_deref(), Some("remote"));
+    assert_eq!(first.ranked_for, vec!["remote", "contract"]);
+    assert!(first.description_excerpt.as_deref().unwrap().contains("Rust"));
+    let li = report.kept.iter().find(|k| k.source == "brave:linkedin").unwrap();
+    assert_eq!(li.url.as_deref(), Some("https://www.linkedin.com/jobs/view/4099999999/"));
 }

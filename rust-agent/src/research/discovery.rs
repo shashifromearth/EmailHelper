@@ -26,6 +26,36 @@ pub struct DiscoveryReport {
     pub dropped: std::collections::BTreeMap<String, usize>,
     /// Applications started for new matches.
     pub applying: usize,
+    /// Every job kept this run, with what other services need to act on it.
+    pub kept: Vec<KeptJob>,
+}
+
+/// A kept job as handed to other services (e.g. the job-links queue).
+#[derive(Debug, Clone, Serialize)]
+pub struct KeptJob {
+    pub job_id: String,
+    /// Board or API it came from ("adzuna", "brave:linkedin", "greenhouse"…).
+    pub source: String,
+    pub posted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The posting's link without tracking parameters.
+    pub url: Option<String>,
+    pub title: String,
+    pub company: Option<String>,
+    pub location: Option<String>,
+    /// remote | hybrid | onsite | unknown
+    pub remote: Option<String>,
+    pub employment_type: Option<String>,
+    pub salary: Option<String>,
+    pub skills: Vec<String>,
+    /// The first ~600 characters of the description.
+    pub description_excerpt: Option<String>,
+    pub score: i64,
+    pub decision: String,
+    /// Ranking points and what earned them (remote, contract…).
+    pub priority_boost: i64,
+    pub ranked_for: Vec<String>,
+    /// False when an earlier run already stored it.
+    pub is_new: bool,
 }
 
 /// Group drop reasons ("only for applicants in USA" → "only for applicants elsewhere").
@@ -34,6 +64,8 @@ fn drop_kind(reason: &str) -> String {
         reason.to_string()
     } else if reason.starts_with("only for applicants") || reason.starts_with("description says") {
         "not open to applicants in your country".into()
+    } else if reason.starts_with("on-site in") {
+        "on-site abroad without visa sponsorship or relocation".into()
     } else {
         reason.to_string()
     }
@@ -189,8 +221,19 @@ async fn collect(app: &App, report: &mut DiscoveryReport) -> Vec<RawJob> {
             }
         }
     }
+    // Job APIs and search APIs (RESEARCH_SOURCES), within their request budget.
+    out.extend(crate::research::job_apis::collect(&app.http, &r.apis, r.max_age_hours, &mut report.errors).await);
     report.collected = out.len();
     out
+}
+
+/// Jobs found through a search API are postings on LinkedIn, Naukri… that
+/// the person applies to with the browser extension, not the job agent.
+fn extension_platform(source: &str) -> Option<&str> {
+    let (provider, site) = source.split_once(':')?;
+    crate::research::search_apis::PROVIDERS
+        .contains(&provider)
+        .then_some(site)
 }
 
 /// Run one discovery pass.
@@ -214,16 +257,11 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
         require_remote: rc.require_remote,
     };
     let now = chrono::Utc::now();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::research::dedupe::Seen::default();
     let mut kept = Vec::new();
     for j in raw {
-        // The same job is often on several boards.
-        let key = format!(
-            "{}|{}",
-            j.details.title.to_lowercase(),
-            j.details.company.as_deref().unwrap_or("").to_lowercase()
-        );
-        if !seen.insert(key) {
+        // The same job is often on several boards (same URL, or same company and title).
+        if !seen.first(&j) {
             *report.dropped.entry("duplicate on another board".into()).or_default() += 1;
             continue;
         }
@@ -236,10 +274,14 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
             Err(reason) => *report.dropped.entry(drop_kind(&reason)).or_default() += 1,
         }
     }
-    let mut scored: Vec<(jdb::JobRecord, Decision)> = Vec::new();
-    for j in kept {
+    // (record, decision, rank boost, what earned the boost)
+    let mut scored: Vec<(jdb::JobRecord, Decision, i64, Vec<String>)> = Vec::new();
+    for mut j in kept {
         report.relevant += 1;
+        let (boost, why) = crate::research::filters::priority(&j, &rc.preferred_work_types, rc.priority_boost);
         let src = j.source.split(':').next().unwrap_or("research").to_string();
+        j.details.url = j.details.url.as_deref().map(crate::research::dedupe::canonical_link);
+        let (posted_at, employment_type) = (j.posted_at, j.employment_type.clone());
         match crate::jobs::score_and_store(
             app,
             &research_person,
@@ -250,25 +292,47 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
         .await
         {
             Ok((rec, decision, is_new)) => {
+                let d = &rec.details;
+                report.kept.push(KeptJob {
+                    job_id: rec.id.clone(),
+                    source: j.source.clone(),
+                    posted_at,
+                    url: d.url.clone(),
+                    title: d.title.clone(),
+                    company: d.company.clone(),
+                    location: d.location.clone(),
+                    remote: d.remote.clone(),
+                    employment_type,
+                    salary: d.salary.clone(),
+                    skills: d.skills.clone(),
+                    description_excerpt: d.description.as_deref().map(|t| t.chars().take(600).collect()),
+                    score: rec.score.unwrap_or(0),
+                    decision: decision.as_str().to_string(),
+                    priority_boost: boost,
+                    ranked_for: why.clone(),
+                    is_new,
+                });
                 if is_new {
                     report.new_jobs += 1;
                     app.metrics
                         .jobs_discovered_total
                         .with_label_values(&[&src])
                         .inc();
-                    scored.push((rec, decision));
+                    scored.push((rec, decision, boost, why));
                 }
             }
             Err(e) => report.errors.push(format!("store: {e}")),
         }
     }
-    scored.sort_by_key(|(r, _)| std::cmp::Reverse(r.score));
+    // Remote and contract/freelance jobs first: match score plus the boost.
+    scored.sort_by_key(|(r, _, boost, _)| std::cmp::Reverse(r.score.unwrap_or(0) + boost));
+    report.kept.sort_by_key(|k| std::cmp::Reverse(k.score + k.priority_boost));
     let top_n = app.cfg.research.summary_top_n;
     report.top = scored
         .iter()
-        .filter(|(_, d)| *d != Decision::Skip)
+        .filter(|(_, d, _, _)| *d != Decision::Skip)
         .take(top_n)
-        .map(|(r, _)| {
+        .map(|(r, _, _, _)| {
             (
                 r.details.title.clone(),
                 r.details.company.clone().unwrap_or_default(),
@@ -281,15 +345,17 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
     // Discovered jobs are only applied to when explicitly enabled: they come
     // from the open web rather than from mail addressed to the user. Every
     // kept job ends up either applying or in the summary with the reason.
-    let mut applying: Vec<(&jdb::JobRecord, Option<&'static str>)> = Vec::new();
-    let mut not_applied: Vec<(&jdb::JobRecord, String)> = Vec::new();
-    for (rec, d) in &scored {
+    let mut applying: Vec<(&jdb::JobRecord, &[String], Option<&'static str>)> = Vec::new();
+    let mut not_applied: Vec<(&jdb::JobRecord, &[String], String)> = Vec::new();
+    for (rec, d, _, ranked_for) in &scored {
         let why: Option<String> = if *d == Decision::Skip {
             Some(if rec.decision_reasons.is_empty() {
                 "did not pass the match rules".to_string()
             } else {
                 rec.decision_reasons.join("; ")
             })
+        } else if let Some(site) = extension_platform(&rec.source) {
+            Some(format!("{site} posting: apply with the browser extension"))
         } else if !app.cfg.jobs.enabled {
             Some("the job agent is off (JOB_AGENT_ENABLED)".into())
         } else if !app.cfg.research.auto_apply {
@@ -302,7 +368,7 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
                 Ok(_) => {
                     report.applying += 1;
                     let note = (*d == Decision::Review).then_some("needs your OK on Telegram first");
-                    applying.push((rec, note));
+                    applying.push((rec, ranked_for, note));
                     None
                 }
                 Err(e) => {
@@ -312,7 +378,7 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
             }
         };
         if let Some(w) = why {
-            not_applied.push((rec, w));
+            not_applied.push((rec, ranked_for, w));
         }
     }
 
@@ -362,19 +428,25 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
             if rc.tech_stack.is_empty() { "search terms".to_string() } else { rc.tech_stack.join(", ") },
         ));
     }
+    if rc.priority_boost > 0 {
+        let mut first = vec!["remote".to_string()];
+        first.extend(rc.preferred_work_types.iter().cloned());
+        text.push_str(&format!("Ranked first: {}\n", first.join("/")));
+    }
     if !report.dropped.is_empty() {
         let parts: Vec<String> = report.dropped.iter().map(|(k, n)| format!("{n} {k}")).collect();
         text.push_str(&format!("Left out: {}\n", parts.join("; ")));
     }
     // Keep the message inside Telegram's limit.
     const MAX_LISTED: usize = 12;
-    let line = |i: usize, r: &jdb::JobRecord| {
+    let line = |i: usize, r: &jdb::JobRecord, ranked_for: &[String]| {
         format!(
-            "{}. [{}] {} — {}\n   {}\n",
+            "{}. [{}] {} — {}{}\n   {}\n",
             i + 1,
             r.score.unwrap_or(0),
             r.details.title,
             r.details.company.as_deref().unwrap_or("-"),
+            if ranked_for.is_empty() { String::new() } else { format!(" ({})", ranked_for.join(", ")) },
             r.details.url.as_deref().unwrap_or("(no link)")
         )
     };
@@ -383,8 +455,8 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
     }
     if !applying.is_empty() {
         text.push_str(&format!("\n🤖 Applying now ({}):\n", applying.len()));
-        for (i, (r, note)) in applying.iter().take(MAX_LISTED).enumerate() {
-            text.push_str(&line(i, r));
+        for (i, (r, ranked_for, note)) in applying.iter().take(MAX_LISTED).enumerate() {
+            text.push_str(&line(i, r, ranked_for));
             if let Some(n) = note {
                 text.push_str(&format!("   ({n})\n"));
             }
@@ -399,8 +471,8 @@ pub async fn run(app: &Arc<App>) -> AppResult<DiscoveryReport> {
             "\n📝 Not applied — apply yourself if interested ({}):\n",
             not_applied.len()
         ));
-        for (i, (r, why)) in not_applied.iter().take(MAX_LISTED).enumerate() {
-            text.push_str(&line(i, r));
+        for (i, (r, ranked_for, why)) in not_applied.iter().take(MAX_LISTED).enumerate() {
+            text.push_str(&line(i, r, ranked_for));
             text.push_str(&format!("   Why not: {why}\n"));
         }
         if not_applied.len() > MAX_LISTED {

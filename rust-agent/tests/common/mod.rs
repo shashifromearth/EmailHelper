@@ -85,6 +85,8 @@ impl Builder {
             ("EH_MAX_RETRIES".into(), "1".into()),
             // Tests never reach the real remote-job boards.
             ("RESEARCH_REMOTE_BOARDS".into(), "none".into()),
+            // ...nor the job / search APIs.
+            ("RESEARCH_SOURCES".into(), "none".into()),
             // tests trigger discovery runs themselves
             ("RESEARCH_SCHEDULE_ENABLED".into(), "false".into()),
             // never query the user's real knowledge service from tests
