@@ -213,12 +213,17 @@ and the correct short answer taken only from the text. Vary the style. JSON: {{\
         }
     }
 
-    // unanswerable
+    // unanswerable: its own share only, so a thin knowledge folder gives a
+    // smaller set instead of one padded with a single scenario
+    let want = (out.len() + quota(0.075)).min(n);
     let mut i = 0;
-    while out.len() < n {
+    while out.len() < want {
         let p = &persons[i % persons.len()];
         out.push(item(out.len(), Scenario::Unanswerable, &p.id, UNANSWERABLE[i % UNANSWERABLE.len()].to_string()));
         i += 1;
+    }
+    if out.len() < n {
+        tracing::warn!(wanted = n, made = out.len(), "the knowledge folder supports fewer questions than requested");
     }
     out.truncate(n);
     out
