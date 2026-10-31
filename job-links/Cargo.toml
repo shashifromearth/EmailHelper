@@ -23,9 +23,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net"] }
-tower-http = { version = "0.6", default-features = false, features = ["cors", "limit", "trace"] }
+tower-http = { version = "0.6", default-features = false, features = ["cors", "limit", "timeout", "trace"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 

@@ -51,6 +51,18 @@ fn tmp_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Whether a snapshot could be written next to `path` (for `/readyz`).
+pub fn check_writable(path: &Path) -> std::io::Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".probe");
+    let probe = path.with_file_name(name);
+    std::fs::write(&probe, b"ok")?;
+    std::fs::remove_file(&probe)
+}
+
 /// Write `links` to `path` atomically.
 pub fn save(path: &Path, links: Vec<LinkRecord>) -> std::io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -147,6 +159,15 @@ mod tests {
             )
             .unwrap();
         assert!(!up.created);
+    }
+
+    #[test]
+    fn writability_check() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(check_writable(&dir.path().join("a").join("links.json")).is_ok());
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, b"x").unwrap();
+        assert!(check_writable(&blocker.join("links.json")).is_err(), "parent is a file");
     }
 
     #[test]

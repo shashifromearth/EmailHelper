@@ -117,7 +117,38 @@ impl Status {
     }
 }
 
-/// One queued job link.
+/// Work arrangement.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", from = "String")]
+pub enum Remote {
+    Remote,
+    Hybrid,
+    Onsite,
+    #[default]
+    Unknown,
+}
+
+impl From<String> for Remote {
+    fn from(s: String) -> Self {
+        match s.trim().to_ascii_lowercase().replace('-', "").as_str() {
+            "remote" => Self::Remote,
+            "hybrid" => Self::Hybrid,
+            "onsite" | "on site" | "office" | "in office" => Self::Onsite,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// One status change.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StatusChange {
+    pub status: Status,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+/// One job in the shared job database.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LinkRecord {
     pub id: String,
@@ -125,6 +156,9 @@ pub struct LinkRecord {
     pub url: String,
     pub original_url: String,
     pub source: Source,
+    /// Email id for `email`, board/API name (remotive, adzuna, …) for `research`.
+    #[serde(default)]
+    pub source_detail: Option<String>,
     pub platform: Platform,
     #[serde(default)]
     pub title: Option<String>,
@@ -133,14 +167,37 @@ pub struct LinkRecord {
     #[serde(default)]
     pub location: Option<String>,
     #[serde(default)]
+    pub remote: Remote,
+    /// full_time | part_time | contract | freelance | consultant | internship | …
+    #[serde(default)]
+    pub employment_type: Option<String>,
+    #[serde(default)]
+    pub salary: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Excerpt, at most ~4 KB.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Matcher score 0-100 and decision (apply/review/skip).
+    #[serde(default)]
+    pub score: Option<u8>,
+    #[serde(default)]
+    pub decision: Option<String>,
+    #[serde(default)]
     pub person_id: Option<String>,
+    /// Which resume (stack) to upload for this job.
+    #[serde(default)]
+    pub resume_hint: Option<String>,
     #[serde(default)]
     pub mailbox: Option<String>,
+    /// When the job was published, if known.
     #[serde(default)]
-    pub email_id: Option<String>,
+    pub posted_at: Option<DateTime<Utc>>,
     pub status: Status,
     #[serde(default)]
     pub status_reason: Option<String>,
+    #[serde(default)]
+    pub status_history: Vec<StatusChange>,
     #[serde(default)]
     pub claimed_by: Option<String>,
     #[serde(default)]
@@ -149,44 +206,52 @@ pub struct LinkRecord {
     pub lease_expires_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub completed_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub discovered_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// How many times the link has been claimed.
     #[serde(default)]
     pub attempts: u32,
 }
 
-/// `POST /v1/links` item.
+/// `POST /v1/links` item. Everything but `url` is optional.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NewLink {
     pub url: String,
-    #[serde(default)]
     pub source: Option<Source>,
-    #[serde(default)]
+    pub source_detail: Option<String>,
     pub platform: Option<Platform>,
-    #[serde(default)]
     pub title: Option<String>,
-    #[serde(default)]
     pub company: Option<String>,
-    #[serde(default)]
     pub location: Option<String>,
-    #[serde(default)]
+    pub remote: Option<Remote>,
+    pub employment_type: Option<String>,
+    pub salary: Option<String>,
+    pub skills: Vec<String>,
+    pub description: Option<String>,
+    pub score: Option<u8>,
+    pub decision: Option<String>,
     pub person_id: Option<String>,
-    #[serde(default)]
+    pub resume_hint: Option<String>,
     pub mailbox: Option<String>,
-    #[serde(default)]
-    pub email_id: Option<String>,
+    pub posted_at: Option<DateTime<Utc>>,
 }
 
 /// `PATCH /v1/links/{id}`: metadata edits and manual status changes. An
-/// empty string clears a field.
+/// empty string clears a text field.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct LinkPatch {
     pub title: Option<String>,
     pub company: Option<String>,
     pub location: Option<String>,
+    pub remote: Option<Remote>,
+    pub employment_type: Option<String>,
+    pub salary: Option<String>,
+    pub description: Option<String>,
+    pub score: Option<u8>,
+    pub decision: Option<String>,
+    pub resume_hint: Option<String>,
     pub mailbox: Option<String>,
-    pub email_id: Option<String>,
     pub status: Option<Status>,
     pub status_reason: Option<String>,
 }
@@ -224,6 +289,8 @@ pub struct ListQuery {
     pub platform: Option<Platform>,
     pub person: Option<String>,
     pub source: Option<Source>,
+    /// Only links updated at or after this time.
+    pub since: Option<DateTime<Utc>>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     /// `asc` (oldest first) or `desc` (default, newest first).

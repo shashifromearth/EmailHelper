@@ -1,6 +1,7 @@
 //! In-memory link store. All mutations go through one `RwLock`, so a claim
 //! is atomic: two clients never get the same link.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
@@ -12,7 +13,8 @@ use serde::Serialize;
 
 use crate::canon;
 use crate::model::{
-    ClaimRequest, LinkPatch, LinkRecord, ListQuery, NewLink, Platform, ResultRequest, Status,
+    ClaimRequest, LinkPatch, LinkRecord, ListQuery, NewLink, Platform, Remote, ResultRequest,
+    Status, StatusChange,
 };
 
 pub const MAX_CLAIM: usize = 50;
@@ -20,6 +22,10 @@ pub const MAX_LIST: usize = 1000;
 const MIN_LEASE_SECS: u64 = 30;
 const MAX_LEASE_SECS: u64 = 24 * 3600;
 const MAX_FIELD_CHARS: usize = 500;
+const MAX_DESCRIPTION_BYTES: usize = 4096;
+const MAX_SKILLS: usize = 50;
+const MAX_SKILL_CHARS: usize = 100;
+const MAX_HISTORY: usize = 50;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
@@ -33,7 +39,7 @@ pub enum StoreError {
 
 #[derive(Default)]
 struct State {
-    /// Insertion order = queue order.
+    /// Insertion order = discovery order.
     links: IndexMap<String, LinkRecord>,
     /// Dedupe key → id.
     by_key: HashMap<String, String>,
@@ -72,19 +78,57 @@ fn clean(v: Option<String>) -> Option<String> {
     (!t.is_empty()).then(|| t.chars().take(MAX_FIELD_CHARS).collect())
 }
 
-fn fill(slot: &mut Option<String>, v: Option<String>) -> bool {
-    match (slot.is_none(), clean(v)) {
-        (true, Some(v)) => {
-            *slot = Some(v);
-            true
+/// `full-time` / `Full Time` → `full_time`.
+fn clean_kind(v: Option<String>) -> Option<String> {
+    clean(v).map(|k| k.to_lowercase().replace(['-', ' '], "_"))
+}
+
+/// Trimmed and cut to about 4 KB on a character boundary.
+fn clean_description(v: Option<String>) -> Option<String> {
+    let v = v?;
+    let t = v.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let mut end = t.len().min(MAX_DESCRIPTION_BYTES);
+    while !t.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(t[..end].to_string())
+}
+
+/// Trimmed, de-duplicated (case-insensitively) and capped.
+fn clean_skills(skills: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in skills {
+        let s: String = s.trim().chars().take(MAX_SKILL_CHARS).collect();
+        if !s.is_empty() && !out.iter().any(|x| x.eq_ignore_ascii_case(&s)) && out.len() < MAX_SKILLS {
+            out.push(s);
         }
-        _ => false,
+    }
+    out
+}
+
+fn check_score(score: Option<u8>) -> Result<Option<u8>, StoreError> {
+    match score {
+        Some(s) if s > 100 => Err(StoreError::Invalid("score must be 0-100".into())),
+        s => Ok(s),
     }
 }
 
-fn set_or_clear(slot: &mut Option<String>, v: Option<String>) {
+/// Fill an empty field; true when it changed.
+fn fill<T>(slot: &mut Option<T>, v: Option<T>) -> bool {
+    if slot.is_none() && v.is_some() {
+        *slot = v;
+        true
+    } else {
+        false
+    }
+}
+
+fn set_or_clear(slot: &mut Option<String>, v: Option<String>, cleaner: fn(Option<String>) -> Option<String>) {
     if let Some(v) = v {
-        *slot = clean(Some(v));
+        *slot = cleaner(Some(v));
     }
 }
 
@@ -92,6 +136,32 @@ fn release(l: &mut LinkRecord) {
     l.claimed_by = None;
     l.claimed_at = None;
     l.lease_expires_at = None;
+}
+
+/// Change status, recording it in the history.
+fn set_status(l: &mut LinkRecord, status: Status, reason: Option<String>, now: DateTime<Utc>) {
+    l.status = status;
+    l.status_reason = reason.clone();
+    l.updated_at = now;
+    l.status_history.push(StatusChange {
+        status,
+        reason,
+        at: now,
+    });
+    if l.status_history.len() > MAX_HISTORY {
+        let extra = l.status_history.len() - MAX_HISTORY;
+        l.status_history.drain(..extra);
+    }
+}
+
+/// Claim order: higher score first (unscored last), then remote or
+/// contract-type work, then the oldest.
+fn priority(l: &LinkRecord, index: usize) -> (Reverse<i16>, bool, usize) {
+    let flexible = l.remote == Remote::Remote
+        || l.employment_type
+            .as_deref()
+            .is_some_and(|k| ["contract", "freelance", "consultant", "consulting"].contains(&k));
+    (Reverse(l.score.map_or(-1, i16::from)), !flexible, index)
 }
 
 impl Store {
@@ -131,10 +201,8 @@ impl Store {
                 match l.lease_expires_at {
                     Some(t) if l.status == Status::Claimed && t <= now => {
                         tracing::info!(id = %l.id, client = ?l.claimed_by, "lease expired; link back to new");
-                        l.status = Status::New;
-                        l.status_reason = Some("lease expired".into());
+                        set_status(l, Status::New, Some("lease expired".into()), now);
                         release(l);
-                        l.updated_at = now;
                         reaped += 1;
                     }
                     Some(t) if l.status == Status::Claimed => {
@@ -174,21 +242,39 @@ impl Store {
         self.len() == 0
     }
 
-    /// Add a link, or merge metadata into the existing one for the same
-    /// canonical URL and person. Never changes an existing link's status.
+    /// Add a link, or fill empty fields of the existing one for the same
+    /// canonical URL and person. Never overwrites a value or changes status.
     pub fn upsert(&self, new: NewLink, now: DateTime<Utc>) -> Result<Upserted, StoreError> {
         let url = canon::canonicalize(&new.url).map_err(|e| StoreError::Invalid(e.to_string()))?;
+        let score = check_score(new.score)?;
         let person = clean(new.person_id);
         let key = dedupe_key(&url, person.as_deref());
         let mut st = self.write(now);
         if let Some(id) = st.by_key.get(&key).cloned() {
             let l = st.links.get_mut(&id).expect("index and links agree");
             let mut changed = false;
-            changed |= fill(&mut l.title, new.title);
-            changed |= fill(&mut l.company, new.company);
-            changed |= fill(&mut l.location, new.location);
-            changed |= fill(&mut l.mailbox, new.mailbox);
-            changed |= fill(&mut l.email_id, new.email_id);
+            changed |= fill(&mut l.source_detail, clean(new.source_detail));
+            changed |= fill(&mut l.title, clean(new.title));
+            changed |= fill(&mut l.company, clean(new.company));
+            changed |= fill(&mut l.location, clean(new.location));
+            changed |= fill(&mut l.employment_type, clean_kind(new.employment_type));
+            changed |= fill(&mut l.salary, clean(new.salary));
+            changed |= fill(&mut l.description, clean_description(new.description));
+            changed |= fill(&mut l.score, score);
+            changed |= fill(&mut l.decision, clean_kind(new.decision));
+            changed |= fill(&mut l.resume_hint, clean(new.resume_hint));
+            changed |= fill(&mut l.mailbox, clean(new.mailbox));
+            changed |= fill(&mut l.posted_at, new.posted_at);
+            if l.remote == Remote::Unknown {
+                if let Some(r) = new.remote.filter(|r| *r != Remote::Unknown) {
+                    l.remote = r;
+                    changed = true;
+                }
+            }
+            if l.skills.is_empty() {
+                l.skills = clean_skills(new.skills);
+                changed |= !l.skills.is_empty();
+            }
             if changed {
                 l.updated_at = now;
                 self.mark_dirty();
@@ -203,28 +289,39 @@ impl Store {
             (Platform::Other | Platform::CareerSite, Some(given)) => given,
             (d, _) => d,
         };
-        let rec = LinkRecord {
+        let mut rec = LinkRecord {
             id: uuid::Uuid::new_v4().to_string(),
             original_url: new.url.trim().chars().take(4096).collect(),
             url,
             source: new.source.unwrap_or_default(),
+            source_detail: clean(new.source_detail),
             platform,
             title: clean(new.title),
             company: clean(new.company),
             location: clean(new.location),
+            remote: new.remote.unwrap_or_default(),
+            employment_type: clean_kind(new.employment_type),
+            salary: clean(new.salary),
+            skills: clean_skills(new.skills),
+            description: clean_description(new.description),
+            score,
+            decision: clean_kind(new.decision),
             person_id: person,
+            resume_hint: clean(new.resume_hint),
             mailbox: clean(new.mailbox),
-            email_id: clean(new.email_id),
+            posted_at: new.posted_at,
             status: Status::New,
             status_reason: None,
+            status_history: Vec::new(),
             claimed_by: None,
             claimed_at: None,
             lease_expires_at: None,
             completed_at: None,
-            created_at: now,
+            discovered_at: now,
             updated_at: now,
             attempts: 0,
         };
+        set_status(&mut rec, Status::New, None, now);
         st.by_key.insert(key, rec.id.clone());
         st.links.insert(rec.id.clone(), rec.clone());
         self.mark_dirty();
@@ -242,6 +339,7 @@ impl Store {
             q.status.is_none_or(|s| l.status == s)
                 && q.platform.is_none_or(|p| l.platform == p)
                 && q.source.is_none_or(|s| l.source == s)
+                && q.since.is_none_or(|t| l.updated_at >= t)
                 && q.person
                     .as_deref()
                     .is_none_or(|p| l.person_id.as_deref() == Some(p))
@@ -278,22 +376,32 @@ impl Store {
         if p.status == Some(Status::Claimed) {
             return Err(StoreError::Invalid("use POST /v1/links/claim to claim links".into()));
         }
+        let score = check_score(p.score)?;
         let mut st = self.write(now);
         let l = st.links.get_mut(id).ok_or(StoreError::NotFound)?;
-        set_or_clear(&mut l.title, p.title);
-        set_or_clear(&mut l.company, p.company);
-        set_or_clear(&mut l.location, p.location);
-        set_or_clear(&mut l.mailbox, p.mailbox);
-        set_or_clear(&mut l.email_id, p.email_id);
-        if let Some(s) = p.status {
-            if s != l.status {
+        set_or_clear(&mut l.title, p.title, clean);
+        set_or_clear(&mut l.company, p.company, clean);
+        set_or_clear(&mut l.location, p.location, clean);
+        set_or_clear(&mut l.employment_type, p.employment_type, clean_kind);
+        set_or_clear(&mut l.salary, p.salary, clean);
+        set_or_clear(&mut l.description, p.description, clean_description);
+        set_or_clear(&mut l.decision, p.decision, clean_kind);
+        set_or_clear(&mut l.resume_hint, p.resume_hint, clean);
+        set_or_clear(&mut l.mailbox, p.mailbox, clean);
+        if let Some(r) = p.remote {
+            l.remote = r;
+        }
+        if score.is_some() {
+            l.score = score;
+        }
+        match p.status {
+            Some(s) if s != l.status => {
                 release(l);
                 l.completed_at = s.is_terminal().then_some(now);
-                l.status = s;
+                set_status(l, s, clean(p.status_reason), now);
             }
-        }
-        if p.status_reason.is_some() || p.status.is_some() {
-            l.status_reason = clean(p.status_reason);
+            _ if p.status_reason.is_some() => l.status_reason = clean(p.status_reason),
+            _ => {}
         }
         l.updated_at = now;
         let out = l.clone();
@@ -310,7 +418,8 @@ impl Store {
         Ok(l)
     }
 
-    /// Claim up to `limit` of the oldest `new` links for `client`.
+    /// Claim up to `limit` `new` links for `client`, highest priority first
+    /// (see [`priority`]).
     pub fn claim(
         &self,
         req: ClaimRequest,
@@ -328,27 +437,29 @@ impl Store {
             .clamp(MIN_LEASE_SECS, MAX_LEASE_SECS);
         let expires = now + chrono::Duration::seconds(lease as i64);
         let mut st = self.write(now);
+        let mut candidates: Vec<(Reverse<i16>, bool, usize)> = st
+            .links
+            .values()
+            .enumerate()
+            .filter(|(_, l)| {
+                l.status == Status::New
+                    && req.platforms.as_ref().is_none_or(|ps| ps.contains(&l.platform))
+                    && req
+                        .person
+                        .as_deref()
+                        .is_none_or(|p| l.person_id.as_deref() == Some(p))
+            })
+            .map(|(i, l)| priority(l, i))
+            .collect();
+        candidates.sort_unstable();
         let mut out = Vec::new();
-        for l in st.links.values_mut() {
-            if out.len() >= limit {
-                break;
-            }
-            let wanted = l.status == Status::New
-                && req.platforms.as_ref().is_none_or(|ps| ps.contains(&l.platform))
-                && req
-                    .person
-                    .as_deref()
-                    .is_none_or(|p| l.person_id.as_deref() == Some(p));
-            if !wanted {
-                continue;
-            }
-            l.status = Status::Claimed;
-            l.status_reason = None;
+        for (_, _, i) in candidates.into_iter().take(limit) {
+            let (_, l) = st.links.get_index_mut(i).expect("index from enumerate");
+            set_status(l, Status::Claimed, Some(format!("claimed by {client}")), now);
             l.claimed_by = Some(client.clone());
             l.claimed_at = Some(now);
             l.lease_expires_at = Some(expires);
             l.attempts += 1;
-            l.updated_at = now;
             out.push(l.clone());
         }
         if !out.is_empty() {
@@ -381,11 +492,9 @@ impl Store {
                 return Err(StoreError::Conflict(format!("link is claimed by {holder}")));
             }
         }
-        l.status = req.status;
-        l.status_reason = clean(req.reason);
+        set_status(l, req.status, clean(req.reason), now);
         l.lease_expires_at = None;
         l.completed_at = Some(now);
-        l.updated_at = now;
         let out = l.clone();
         self.mark_dirty();
         Ok(out)
@@ -671,6 +780,134 @@ mod tests {
         let stats = s.stats(now);
         assert_eq!(stats.by_status["new"], 5);
         assert_eq!(stats.by_platform["lever"], 4);
+    }
+
+    #[test]
+    fn claim_order_is_score_then_flexible_then_oldest() {
+        let s = Store::new();
+        let now = Utc::now();
+        let add = |n: u32, score: Option<u8>, remote: Remote, kind: Option<&str>| {
+            s.upsert(
+                NewLink {
+                    score,
+                    remote: Some(remote),
+                    employment_type: kind.map(Into::into),
+                    ..link(&format!("https://jobs.lever.co/acme/{n}"), None)
+                },
+                now,
+            )
+            .unwrap();
+        };
+        add(0, None, Remote::Remote, None);
+        add(1, Some(70), Remote::Onsite, None);
+        add(2, Some(70), Remote::Onsite, Some("Contract"));
+        add(3, Some(90), Remote::Onsite, None);
+        add(4, Some(70), Remote::Remote, None);
+        let (got, _) = s.claim(claim("x", 10), LEASE, now).unwrap();
+        let order: Vec<&str> = got.iter().map(|l| l.url.rsplit('/').next().unwrap()).collect();
+        assert_eq!(order, ["3", "2", "4", "1", "0"]);
+        assert_eq!(got[1].employment_type.as_deref(), Some("contract"));
+    }
+
+    #[test]
+    fn status_history_records_every_change() {
+        let s = Store::new();
+        let now = Utc::now();
+        let id = s.upsert(link("https://jobs.lever.co/acme/1", None), now).unwrap().link.id;
+        s.claim(ClaimRequest { lease_secs: Some(60), ..claim("a", 1) }, LEASE, now).unwrap();
+        let later = now + chrono::Duration::seconds(61);
+        s.claim(claim("b", 1), LEASE, later).unwrap();
+        let l = s
+            .result(
+                &id,
+                ResultRequest {
+                    status: Status::Skipped,
+                    reason: Some("needs visa".into()),
+                    client: Some("b".into()),
+                },
+                later,
+            )
+            .unwrap();
+        let h: Vec<(Status, Option<&str>)> =
+            l.status_history.iter().map(|c| (c.status, c.reason.as_deref())).collect();
+        assert_eq!(
+            h,
+            [
+                (Status::New, None),
+                (Status::Claimed, Some("claimed by a")),
+                (Status::New, Some("lease expired")),
+                (Status::Claimed, Some("claimed by b")),
+                (Status::Skipped, Some("needs visa")),
+            ]
+        );
+    }
+
+    #[test]
+    fn job_fields_are_cleaned_and_merged() {
+        let s = Store::new();
+        let now = Utc::now();
+        let first = s
+            .upsert(
+                NewLink {
+                    source: Some(crate::model::Source::Research),
+                    source_detail: Some("remotive".into()),
+                    skills: vec!["Rust".into(), " rust ".into(), "".into(), "Python".into()],
+                    description: Some("é".repeat(3000)),
+                    score: Some(88),
+                    decision: Some("Apply".into()),
+                    ..link("https://jobs.lever.co/acme/1", Some("p1"))
+                },
+                now,
+            )
+            .unwrap()
+            .link;
+        assert_eq!(first.skills, ["Rust", "Python"]);
+        assert!(first.description.as_ref().unwrap().len() <= 4096);
+        assert_eq!(first.decision.as_deref(), Some("apply"));
+        let merged = s
+            .upsert(
+                NewLink {
+                    source_detail: Some("adzuna".into()),
+                    score: Some(10),
+                    remote: Some(Remote::Hybrid),
+                    resume_hint: Some("python".into()),
+                    skills: vec!["Go".into()],
+                    ..link("https://jobs.lever.co/acme/1", Some("p1"))
+                },
+                now,
+            )
+            .unwrap()
+            .link;
+        assert_eq!(merged.source_detail.as_deref(), Some("remotive"), "never overwritten");
+        assert_eq!(merged.score, Some(88));
+        assert_eq!(merged.skills, ["Rust", "Python"]);
+        assert_eq!(merged.remote, Remote::Hybrid, "unknown is filled");
+        assert_eq!(merged.resume_hint.as_deref(), Some("python"));
+        assert!(s
+            .upsert(
+                NewLink {
+                    score: Some(101),
+                    ..link("https://jobs.lever.co/acme/2", None)
+                },
+                now
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn list_since_filters_on_updated_at() {
+        let s = Store::new();
+        let t0 = Utc::now();
+        s.upsert(link("https://jobs.lever.co/acme/1", None), t0).unwrap();
+        let t1 = t0 + chrono::Duration::seconds(10);
+        s.upsert(link("https://jobs.lever.co/acme/2", None), t1).unwrap();
+        let q = ListQuery {
+            since: Some(t1),
+            ..Default::default()
+        };
+        let (total, page) = s.list(&q, t1);
+        assert_eq!(total, 1);
+        assert!(page[0].url.ends_with("/2"));
     }
 
     #[test]

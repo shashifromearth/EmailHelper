@@ -18,12 +18,15 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,tower_http=warn".into()),
         )
-        // No colour codes in data\logs\job-links.log.
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+        .json()
         .init();
 
-    let cfg = Config::from_env()?;
-    let records = snapshot::load(&cfg.snapshot_path)?;
+    let cfg = Config::from_env().inspect_err(|e| {
+        tracing::error!(error = format!("{e:#}"), "invalid configuration");
+    })?;
+    let records = snapshot::load(&cfg.snapshot_path).inspect_err(|e| {
+        tracing::error!(error = format!("{e:#}"), "cannot load snapshot");
+    })?;
     tracing::info!(links = records.len(), path = %cfg.snapshot_path.display(), "snapshot loaded");
     let store = Arc::new(Store::from_records(records));
 
@@ -44,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         token: cfg.token.into(),
         default_lease: cfg.default_lease,
+        snapshot_path: Arc::new(cfg.snapshot_path.clone()),
     });
     let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

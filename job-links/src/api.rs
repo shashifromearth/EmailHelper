@@ -1,6 +1,8 @@
 //! HTTP API. Everything under `/v1` needs the `x-joblinks-token` header;
-//! `/health` is open. CORS admits `chrome-extension://` origins only.
+//! `/health`, `/livez` and `/readyz` are open. CORS admits
+//! `chrome-extension://` origins only.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,19 +23,27 @@ use crate::store::{Store, StoreError};
 
 pub const TOKEN_HEADER: &str = "x-joblinks-token";
 pub const MAX_BATCH: usize = 500;
-const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Store>,
     pub token: Arc<str>,
     pub default_lease: Duration,
+    /// Checked by `/readyz`.
+    pub snapshot_path: Arc<PathBuf>,
 }
 
 pub struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if self.0.is_server_error() {
+            tracing::error!(status = self.0.as_u16(), error = %self.1, "request failed");
+        } else {
+            tracing::warn!(status = self.0.as_u16(), error = %self.1, "request rejected");
+        }
         (self.0, Json(json!({ "error": self.1 }))).into_response()
     }
 }
@@ -104,8 +114,14 @@ pub fn router(state: AppState) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth));
     Router::new()
         .route("/health", get(health))
+        .route("/livez", get(livez))
+        .route("/readyz", get(readyz))
         .merge(v1)
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors())
         .with_state(state)
@@ -113,6 +129,31 @@ pub fn router(state: AppState) -> Router {
 
 async fn health(State(st): State<AppState>) -> Json<Value> {
     Json(json!({ "status": "ok", "links": st.store.len() }))
+}
+
+/// The process is up.
+async fn livez() -> Json<Value> {
+    Json(json!({ "status": "ok" }))
+}
+
+/// Ready when the snapshot can be written.
+async fn readyz(State(st): State<AppState>) -> Response {
+    let path = st.snapshot_path.clone();
+    let res = tokio::task::spawn_blocking(move || crate::snapshot::check_writable(&path))
+        .await
+        .map_err(std::io::Error::other)
+        .and_then(|r| r);
+    match res {
+        Ok(()) => Json(json!({ "status": "ready" })).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, path = %st.snapshot_path.display(), "snapshot not writable");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "status": "not_ready", "error": format!("snapshot not writable: {e}") })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// One link (`{url,…}`), an array, or `{"links": [...]}`.

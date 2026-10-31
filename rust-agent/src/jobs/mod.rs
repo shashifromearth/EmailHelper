@@ -248,7 +248,8 @@ fn alert_platform<'a>(source: &'a str, platform_links: &'a [detect::JobLink]) ->
 }
 
 /// `JOB_LINKS_ENABLED`: hand every job link in the email to the job-links
-/// service (the Chrome extension applies from there); nothing is browsed.
+/// service (the Chrome extension applies from there), scored on what the
+/// email says; nothing is browsed.
 async fn queue_links(
     app: &Arc<App>,
     e: &EmailRecord,
@@ -258,12 +259,29 @@ async fn queue_links(
 ) -> AppResult<()> {
     let listed = alerts::parse(alert_platform(&signal.source, platform_links), &e.body_text);
     let person_id = person_id_of(person);
-    let links = linkqueue::links_for_email(e, signal, &listed, person_id.as_deref());
+    let links: Vec<linkqueue::QueuedLink> = linkqueue::jobs_in_email(e, signal, &listed)
+        .into_iter()
+        .map(|(link, d)| {
+            // Without a title there is nothing to score; such jobs sort last.
+            let m = (!d.title.trim().is_empty()).then(|| {
+                matcher::score(&d, &person.profile, app.cfg.jobs.auto_apply_threshold, app.cfg.jobs.review_threshold)
+            });
+            linkqueue::QueuedLink {
+                source_detail: Some(e.id.clone()),
+                score: m.as_ref().map(|m| m.score.min(100)),
+                decision: m.as_ref().map(|m| m.decision.as_str().to_string()),
+                person_id: person_id.clone(),
+                resume_hint: person.select_resume(&d.skills, None).map(|(r, _)| r.file_name.clone()),
+                mailbox: e.account_email.clone(),
+                ..linkqueue::QueuedLink::from_job(linkqueue::LinkSource::Email, &link.url, Some(&link.ats), &d)
+            }
+        })
+        .collect();
     if links.is_empty() {
         tracing::info!(email_id = %e.id, "no job links to queue");
         return Ok(());
     }
-    let summary = linkqueue::LinkQueueClient::from_app(app).push(&links).await?;
+    let summary = linkqueue::LinkQueueClient::from_app(app).upsert(&links).await?;
     app.audit(
         "job_agent",
         "job_links_queued",

@@ -1,5 +1,6 @@
 //! HTTP tests: the router driven in-process with `tower::ServiceExt::oneshot`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,14 +15,19 @@ use tower::ServiceExt;
 
 const TOKEN: &str = "test-token-0123456789";
 
-fn app() -> (Router, Arc<Store>) {
+fn app_with_snapshot(snapshot: PathBuf) -> (Router, Arc<Store>) {
     let store = Arc::new(Store::new());
     let r = router(AppState {
         store: store.clone(),
         token: TOKEN.into(),
         default_lease: Duration::from_secs(600),
+        snapshot_path: Arc::new(snapshot),
     });
     (r, store)
+}
+
+fn app() -> (Router, Arc<Store>) {
+    app_with_snapshot(std::env::temp_dir().join("job-links-http-test").join("links.json"))
 }
 
 async fn call(app: &Router, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -67,6 +73,24 @@ async fn health_is_open_and_v1_needs_the_token() {
 }
 
 #[tokio::test]
+async fn probes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, _) = app_with_snapshot(dir.path().join("data").join("links.json"));
+    for path in ["/livez", "/readyz"] {
+        let resp = app.clone().oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+    }
+    // A snapshot path under a regular file can't be written.
+    let file = dir.path().join("plain-file");
+    std::fs::write(&file, b"x").unwrap();
+    let (app, _) = app_with_snapshot(file.join("links.json"));
+    let resp = app.clone().oneshot(Request::get("/readyz").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let resp = app.oneshot(Request::get("/livez").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn create_single_then_upsert() {
     let (app, _) = app();
     let link = json!({
@@ -74,8 +98,16 @@ async fn create_single_then_upsert() {
         "source": "email",
         "title": "Staff AI Engineer",
         "person_id": "shashi",
+        "source_detail": "email-1",
         "mailbox": "me@example.com",
-        "email_id": "e1"
+        "remote": "remote",
+        "employment_type": "Full-Time",
+        "skills": ["Rust", "LLMs"],
+        "description": "Build agents.",
+        "score": 84,
+        "decision": "apply",
+        "resume_hint": "python",
+        "posted_at": "2026-10-30T09:00:00Z"
     });
     let (status, v) = call(&app, Method::POST, "/v1/links", Some(link.clone())).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -84,6 +116,15 @@ async fn create_single_then_upsert() {
     assert_eq!(v["link"]["platform"], "linkedin");
     assert_eq!(v["link"]["status"], "new");
     assert_eq!(v["link"]["source"], "email");
+    assert_eq!(v["link"]["source_detail"], "email-1");
+    assert_eq!(v["link"]["remote"], "remote");
+    assert_eq!(v["link"]["employment_type"], "full_time");
+    assert_eq!(v["link"]["skills"], json!(["Rust", "LLMs"]));
+    assert_eq!(v["link"]["score"], 84);
+    assert_eq!(v["link"]["resume_hint"], "python");
+    assert_eq!(v["link"]["posted_at"], "2026-10-30T09:00:00Z");
+    assert_eq!(v["link"]["status_history"][0]["status"], "new");
+    assert!(v["link"]["discovered_at"].is_string());
     let id = v["link"]["id"].as_str().unwrap().to_string();
 
     let mut again = link;
@@ -138,6 +179,10 @@ async fn list_filters() {
         { "url": "https://www.naukri.com/job-listings-x-3", "person_id": "p1" }
     ]);
     call(&app, Method::POST, "/v1/links", Some(body)).await;
+    let (_, v) = call(&app, Method::GET, "/v1/links?since=2000-01-01T00:00:00Z&source=manual", None).await;
+    assert_eq!(v["total"], 3);
+    let (_, v) = call(&app, Method::GET, "/v1/links?since=2999-01-01T00:00:00Z", None).await;
+    assert_eq!(v["total"], 0);
     let (_, v) = call(&app, Method::GET, "/v1/links?platform=lever&person=p1", None).await;
     assert_eq!(v["total"], 1);
     assert_eq!(v["links"][0]["url"], "https://jobs.lever.co/acme/1");
