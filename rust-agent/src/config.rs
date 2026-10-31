@@ -142,6 +142,11 @@ pub struct JobConfig {
     /// Daily Telegram digest of jobs the person must apply to themselves.
     pub digest_time: NaiveTime,
     pub digest_max: usize,
+    /// Queue job links on the job-links service (for the Chrome extension)
+    /// instead of applying through the browser worker.
+    pub links_enabled: bool,
+    pub links_url: String,
+    pub links_token: String,
 }
 
 #[derive(Clone, Debug)]
@@ -361,6 +366,9 @@ impl Config {
                 })?
             },
             digest_max: num("JOB_DIGEST_MAX", 15)? as usize,
+            links_enabled: b("JOB_LINKS_ENABLED", false),
+            links_url: s_or("JOB_LINKS_URL", "http://127.0.0.1:7810"),
+            links_token: s("JOB_LINKS_TOKEN").unwrap_or_default(),
         };
 
         let daily_raw = s_or("RESEARCH_DAILY_TIME", "07:30");

@@ -88,6 +88,31 @@ Browser worker settings (read by `browser-worker/`): `BROWSER_WORKER_HOST`,
 `BROWSER_SCREENSHOT_DIR`, `BROWSER_NAV_TIMEOUT_MS`,
 `BROWSER_ALLOWED_UPLOAD_DIRS`. See `browser-worker/README.md`.
 
+## Job-link queue
+
+`job-links/` is a separate local service: the shared job database the
+Chrome extension applies from (in your own browser). With
+`JOB_LINKS_ENABLED=true` the job agent writes every job link it finds in mail
+to the service, with the person, mailbox, email id, what the alert says about
+the job, a matcher score/decision from that and the resume to use, **instead
+of** opening pages and applying through the browser worker. Job emails are
+still only handled when `JOB_AGENT_ENABLED=true`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `JOB_LINKS_ENABLED` | `false` | Queue job links on the service instead of applying with the browser worker. `run.cmd` also starts the service when this (or `JOB_LINKS_TOKEN`) is set. |
+| `JOB_LINKS_URL` | `http://127.0.0.1:7810` | Service address, as the agent sees it. |
+| `JOB_LINKS_TOKEN` | — | Shared secret (`x-joblinks-token` header), 16+ characters. The service refuses to start without it; the agent and the extension send the same value. |
+
+Read only by the service (`job-links/README.md` has the API):
+
+| Variable | Default | Description |
+|---|---|---|
+| `JOB_LINKS_PORT` | `7810` | Port; the service binds 127.0.0.1 only. |
+| `JOB_LINKS_SNAPSHOT` | `data/job-links.json` | JSON snapshot loaded at start-up and rewritten atomically when links change. |
+| `JOB_LINKS_SNAPSHOT_SECS` | `5` | How often a changed store is written (and once more on shutdown). |
+| `JOB_LINKS_LEASE_SECS` | `900` | How long a claimed link stays claimed without a result before it goes back to `new`. |
+
 ## Research agent
 
 | Variable | Default | Description |

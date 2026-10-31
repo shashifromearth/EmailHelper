@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["rust-agent", "knowledge-core", "knowledge-service"]
+members = ["rust-agent", "knowledge-core", "knowledge-service", "job-links"]
 
 [workspace.package]
 version = "1.0.0"

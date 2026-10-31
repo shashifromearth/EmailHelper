@@ -23,6 +23,9 @@ pub struct JobLink {
     pub url: String,
     /// greenhouse | lever | ashby | workday | linkedin | naukri | glassdoor | wellfound | foundit | indeed | career_site
     pub ats: String,
+    /// Text of the HTML link, when it names the job (not "View job").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,32 +45,121 @@ fn url_re() -> &'static Regex {
     R.get_or_init(|| Regex::new(r#"(?i)https?://[^\s<>"'()\]\[]+"#).expect("valid regex"))
 }
 
+/// Query parameters a redirect wrapper keeps its target in.
+const TARGET_PARAMS: &[&str] = &[
+    "url", "q", "u", "target", "dest", "destination", "redirect", "redirect_url", "redirecturl",
+    "redirect_uri", "link", "to", "data",
+];
+
+/// Hosts and paths that only forward the click somewhere else.
+fn is_wrapper(host: &str, path: &str) -> bool {
+    host.ends_with("safelinks.protection.outlook.com")
+        || host == "l.facebook.com"
+        || host == "dl.naukri.com"
+        || host == "my.naukri.com"
+        || ((host == "google.com" || host.starts_with("www.google.")) && path == "/url")
+        || (host.ends_with("linkedin.com") && path.starts_with("/redir"))
+        || ["/redirect", "/redir", "/click", "/track", "/r/"]
+            .iter()
+            .any(|p| path.starts_with(p))
+}
+
+/// A parameter value that is a URL, directly or base64-encoded.
+fn url_in(v: &str) -> Option<String> {
+    use base64::Engine;
+    let v = v.trim();
+    if v.starts_with("http://") || v.starts_with("https://") {
+        return Some(v.to_string());
+    }
+    let engines = [
+        base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        base64::engine::general_purpose::STANDARD_NO_PAD,
+    ];
+    let trimmed = v.trim_end_matches('=');
+    engines
+        .iter()
+        .filter_map(|e| e.decode(trimmed).ok())
+        .filter_map(|b| String::from_utf8(b).ok())
+        .find(|s| s.starts_with("http://") || s.starts_with("https://"))
+}
+
+/// The URL a redirect/tracking wrapper (SafeLinks, Google, LinkedIn and
+/// Naukri redirects) points at, when the target is in the URL itself.
+/// Anything else is returned unchanged.
+pub fn unwrap_redirect(raw: &str) -> String {
+    let mut cur = raw.trim().replace("&amp;", "&");
+    for _ in 0..4 {
+        let Ok(u) = url::Url::parse(&cur) else { break };
+        let host = u.host_str().unwrap_or_default().to_ascii_lowercase();
+        if !is_wrapper(&host, &u.path().to_ascii_lowercase()) {
+            break;
+        }
+        let next = u
+            .query_pairs()
+            .filter(|(k, _)| TARGET_PARAMS.contains(&k.to_ascii_lowercase().as_str()))
+            .find_map(|(_, v)| url_in(&v));
+        match next {
+            Some(n) if n != cur => cur = n,
+            _ => break,
+        }
+    }
+    cur
+}
+
+/// LinkedIn job id from `/jobs/view/123`, `/comm/jobs/view/slug-123` or
+/// `?currentJobId=123`.
+fn linkedin_job_id(u: &url::Url) -> Option<String> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let re = R.get_or_init(|| Regex::new(r"/jobs/view/(?:[^/?]*-)?(\d+)").expect("valid regex"));
+    re.captures(u.path())
+        .map(|c| c[1].to_string())
+        .or_else(|| {
+            u.query_pairs()
+                .find(|(k, v)| {
+                    k.eq_ignore_ascii_case("currentjobid")
+                        && !v.is_empty()
+                        && v.chars().all(|c| c.is_ascii_digit())
+                })
+                .map(|(_, v)| v.into_owned())
+        })
+}
+
 /// Classify a URL as a job posting link and normalise it, or return `None`.
+/// Redirect wrappers are unwrapped first.
 pub fn classify_url(raw: &str) -> Option<JobLink> {
-    let trimmed = raw.trim_end_matches(['.', ',', ';', ')', '>', '*']);
+    let unwrapped = unwrap_redirect(raw);
+    let trimmed = unwrapped.trim_end_matches(['.', ',', ';', ')', '>', '*']);
     let mut u = url::Url::parse(trimmed).ok()?;
     let host = u.host_str()?.to_ascii_lowercase();
     let path = u.path().to_ascii_lowercase();
+    let link = |url: String, ats: &str| JobLink {
+        url,
+        ats: ats.into(),
+        label: None,
+    };
 
     // LinkedIn alert links look like /comm/jobs/view/123?trackingId=...
     if host.ends_with("linkedin.com") {
-        let re = {
-            static R: OnceLock<Regex> = OnceLock::new();
-            R.get_or_init(|| Regex::new(r"/jobs/view/(\d+)").expect("valid regex"))
-        };
-        let id = re.captures(&path)?.get(1)?.as_str().to_string();
-        return Some(JobLink {
-            url: format!("https://www.linkedin.com/jobs/view/{id}/"),
-            ats: "linkedin".into(),
-        });
+        let id = linkedin_job_id(&u)?;
+        return Some(link(format!("https://www.linkedin.com/jobs/view/{id}/"), "linkedin"));
+    }
+    // Indeed: the `jk` parameter is the job.
+    if host.contains("indeed.") {
+        let jk = u.query_pairs().find(|(k, _)| k == "jk" || k == "vjk").map(|(_, v)| v.into_owned());
+        if let Some(jk) = jk.filter(|j| !j.is_empty()) {
+            return Some(link(format!("https://{host}/viewjob?jk={jk}"), "indeed"));
+        }
     }
 
-    // Strip tracking parameters everywhere else.
+    // Strip tracking parameters everywhere else (Naukri listings end in the
+    // job id, so their query is all tracking).
+    let naukri_listing = host.ends_with("naukri.com") && path.contains("job-listings");
     let kept: Vec<(String, String)> = u
         .query_pairs()
         .filter(|(k, _)| {
             let k = k.to_ascii_lowercase();
-            !(k.starts_with("utm_")
+            !(naukri_listing
+                || k.starts_with("utm_")
                 || k == "gh_src"
                 || k == "source"
                 || k == "ref"
@@ -75,7 +167,11 @@ pub fn classify_url(raw: &str) -> Option<JobLink> {
                 || k == "trackingid"
                 || k == "refid"
                 || k == "lipi"
-                || k == "src")
+                || k == "src"
+                || k == "gclid"
+                || k == "fbclid"
+                || k == "lever-source"
+                || k == "lever-origin")
         })
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
@@ -130,29 +226,65 @@ pub fn classify_url(raw: &str) -> Option<JobLink> {
         .any(|n| path.contains(n));
         ((careerish || pathish) && !noise && path.len() > 1).then_some("career_site")
     }?;
-    Some(JobLink {
-        url: u.to_string(),
-        ats: ats.into(),
-    })
+    Some(link(u.to_string(), ats))
 }
 
-/// Extract normalised, de-duplicated job links from text and HTML.
+/// Link text worth keeping as a job title hint.
+fn label_of(text: &str) -> Option<String> {
+    let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = t.to_lowercase();
+    let generic = [
+        "view job", "view jobs", "view", "apply", "apply now", "easy apply", "see job", "see jobs",
+        "see more jobs", "view & apply", "view and apply", "view opportunity", "click here", "here",
+        "learn more", "more", "read more", "details", "job details", "view details", "see all jobs",
+    ];
+    let looks_like_url = lower.starts_with("http") || lower.starts_with("www.");
+    (t.chars().count() >= 3 && t.chars().count() <= 150 && !generic.contains(&lower.as_str()) && !looks_like_url)
+        .then_some(t)
+}
+
+/// `(href, text)` of every `<a href>` in an HTML body.
+fn anchors(html: &str) -> Vec<(String, String)> {
+    static SEL: OnceLock<scraper::Selector> = OnceLock::new();
+    let sel = SEL.get_or_init(|| scraper::Selector::parse("a[href]").expect("valid selector"));
+    let doc = scraper::Html::parse_document(html);
+    doc.select(sel)
+        .filter_map(|a| {
+            let href = a.value().attr("href")?.trim().to_string();
+            Some((href, a.text().collect::<String>()))
+        })
+        .collect()
+}
+
+/// Extract normalised, de-duplicated job links from text and HTML: plain
+/// URLs in the text, `<a href>` targets (their text becomes the label), and
+/// any other URL in the HTML source.
 pub fn extract_links(text: &str, html: Option<&str>) -> Vec<JobLink> {
     let mut out: Vec<JobLink> = Vec::new();
-    let mut push = |s: &str| {
-        let s = s.replace("&amp;", "&");
-        if let Some(l) = classify_url(&s) {
-            if !out.iter().any(|x| x.url == l.url) && out.len() < MAX_LINKS {
+    let mut push = |s: &str, label: Option<String>| {
+        let Some(mut l) = classify_url(s) else { return };
+        match out.iter().position(|x| x.url == l.url) {
+            Some(i) => {
+                if out[i].label.is_none() {
+                    out[i].label = label;
+                }
+            }
+            None if out.len() < MAX_LINKS => {
+                l.label = label;
                 out.push(l);
             }
+            None => {}
         }
     };
     for m in url_re().find_iter(text) {
-        push(m.as_str());
+        push(m.as_str(), None);
     }
     if let Some(h) = html {
+        for (href, text) in anchors(h) {
+            push(&href, label_of(&text));
+        }
         for m in url_re().find_iter(h) {
-            push(m.as_str());
+            push(m.as_str(), None);
         }
     }
     out
@@ -402,6 +534,81 @@ mod tests {
         assert!(classify_url("https://www.linkedin.com/feed/").is_none());
         assert!(classify_url("https://acme.com/jobs/alerts/unsubscribe").is_none());
         assert!(classify_url("https://jobs.lever.co/acme").is_none());
+        assert_eq!(
+            classify_url("https://in.linkedin.com/jobs/view/staff-ai-engineer-at-acme-3912345678?trk=x")
+                .unwrap()
+                .url,
+            "https://www.linkedin.com/jobs/view/3912345678/"
+        );
+        assert_eq!(
+            classify_url("https://www.linkedin.com/jobs/collections/recommended/?currentJobId=3912345678")
+                .unwrap()
+                .url,
+            "https://www.linkedin.com/jobs/view/3912345678/"
+        );
+        let indeed = classify_url("https://in.indeed.com/rc/clk?jk=abc123&from=ja").unwrap();
+        assert_eq!((indeed.url.as_str(), indeed.ats.as_str()), ("https://in.indeed.com/viewjob?jk=abc123", "indeed"));
+        assert_eq!(
+            classify_url("https://www.naukri.com/job-listings-ai-engineer-acme-5-to-10-years-161026503618?src=ja&xp=1")
+                .unwrap()
+                .url,
+            "https://www.naukri.com/job-listings-ai-engineer-acme-5-to-10-years-161026503618"
+        );
+    }
+
+    fn enc(s: &str) -> String {
+        url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+    }
+
+    #[test]
+    fn unwraps_redirect_wrappers() {
+        let lever = "https://jobs.lever.co/acme/1b2c-3d";
+        let safelink = format!(
+            "https://eur01.safelinks.protection.outlook.com/?url={}&data=05%7C01%7C&reserved=0",
+            enc(lever)
+        );
+        assert_eq!(unwrap_redirect(&safelink), lever);
+        let google = format!("https://www.google.com/url?q={}&sa=D", enc(&safelink));
+        assert_eq!(unwrap_redirect(&google), lever, "nested wrappers");
+        let li = format!("https://www.linkedin.com/redir/redirect?url={}&urlhash=x", enc(lever));
+        assert_eq!(classify_url(&li).unwrap().ats, "lever");
+        let naukri = "https://www.naukri.com/job-listings-ai-engineer-acme-161026503618";
+        let my = format!("https://my.naukri.com/AL/redirect?id=7&url={}", enc(naukri));
+        assert_eq!(classify_url(&my).unwrap().url, naukri);
+        use base64::Engine;
+        let dl = format!(
+            "https://dl.naukri.com/?data={}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(naukri)
+        );
+        assert_eq!(classify_url(&dl).unwrap().ats, "naukri");
+        // Opaque wrappers and normal pages are left alone.
+        assert!(classify_url("https://dl.naukri.com?data=x").is_none());
+        let page = "https://acme.com/jobs/42?url=https%3A%2F%2Fevil.example";
+        assert_eq!(unwrap_redirect(page), page);
+    }
+
+    #[test]
+    fn extracts_html_anchors_with_labels() {
+        let lever = "https://jobs.lever.co/acme/1b2c-3d";
+        let html = format!(
+            r#"<html><body>
+            <a href="https://www.linkedin.com/comm/jobs/view/3912345678/?trackingId=a&amp;refId=b">Staff AI Engineer</a>
+            <a href="https://www.linkedin.com/comm/jobs/view/3912345678/?trackingId=c">View job</a>
+            <a href="https://eur01.safelinks.protection.outlook.com/?url={}&amp;data=x">  Rust
+               Engineer </a>
+            <a href="https://www.linkedin.com/comm/jobs/view/4000000001/">View job</a>
+            <a href="https://www.linkedin.com/feed/">Home</a>
+            <a href="mailto:x@acme.com">mail</a>
+            </body></html>"#,
+            enc(lever)
+        );
+        let links = extract_links("", Some(&html));
+        assert_eq!(links.len(), 3, "{links:?}");
+        assert_eq!(links[0].url, "https://www.linkedin.com/jobs/view/3912345678/");
+        assert_eq!(links[0].label.as_deref(), Some("Staff AI Engineer"));
+        assert_eq!(links[1].url, lever);
+        assert_eq!(links[1].label.as_deref(), Some("Rust Engineer"));
+        assert_eq!(links[2].label, None, "generic link text is not a title");
     }
 
     #[test]

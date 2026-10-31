@@ -1,5 +1,6 @@
 # Start the EmailHelper stack locally from .env:
-#   browser worker (if JOB_AGENT_ENABLED or RECRUITER_LINKEDIN_ENABLED), optional
+#   browser worker (if JOB_AGENT_ENABLED or RECRUITER_LINKEDIN_ENABLED), the
+#   job-links service (if JOB_LINKS_ENABLED or JOB_LINKS_TOKEN is set), optional
 #   mock ATS sites, and the Rust agent. Logs go to data\logs, PIDs to data\run.
 #
 #   scripts\run-local.ps1                 # agent + worker
@@ -8,7 +9,8 @@
 param(
     [switch]$WithMockSites,
     [int]$MockPort = 18080,
-    [string]$Binary = ''
+    [string]$Binary = '',
+    [string]$LinksBinary = ''
 )
 $ErrorActionPreference = 'Continue'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
@@ -83,6 +85,18 @@ if (Test-Path $ks) {
     else { Write-Warning "knowledge service not live yet; see data\logs\knowledge-service.log" }
 } else {
     Write-Warning "knowledge-service binary not found; drafts use the local keyword index"
+}
+
+if ($env:JOB_LINKS_ENABLED -eq 'true' -or $env:JOB_LINKS_TOKEN) {
+    if (-not $LinksBinary) {
+        $LinksBinary = Join-Path $root 'target\release\job-links.exe'
+        if (-not (Test-Path $LinksBinary)) { $LinksBinary = Join-Path $root 'target\debug\job-links.exe' }
+    }
+    if (-not (Test-Path $LinksBinary)) { throw "job-links binary not found; run 'cargo build --release -p job-links'" }
+    Start-Component 'job-links' $LinksBinary @() $root
+    $linksPort = if ($env:JOB_LINKS_PORT) { $env:JOB_LINKS_PORT } else { '7810' }
+    if (Wait-Http "http://127.0.0.1:$linksPort/health" 15) { Write-Host "job links: http://127.0.0.1:$linksPort/health" }
+    else { Write-Warning "job-links not healthy yet (is JOB_LINKS_TOKEN 16+ chars?); see data\logs\job-links.err.log" }
 }
 
 if (-not $Binary) {
