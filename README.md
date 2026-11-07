@@ -172,4 +172,4 @@ assistants connected to your own knowledge and systems. If your company wants
 an email support system like this, set up on your infrastructure, trained on
 your knowledge and integrated with your tools, get in touch:
 
-**Contact:** _your-email@your-company.com_
+**Contact:** [techgroup@khmtechnology.com](mailto:techgroup@khmtechnology.com)
