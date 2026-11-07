@@ -186,10 +186,7 @@ Response: `204 No Content`.
 | GET  | `/api/v1/dashboard` | Aggregated JSON for the dashboard page |
 | GET  | `/api/v1/jobs?limit=50` | Discovered and detected jobs, ranked |
 | POST | `/api/v1/jobs` | `{ "url": "...", "apply": false, "person": "shashi" }`: open, extract, score and store a job by URL; `apply: true` also starts an application (needs `JOB_AGENT_ENABLED`) |
-| POST | `/api/v1/apply/answers` | Chrome extension: `{ "person": "shashi", "job": { "title": "...", "company": "...", "skills": [] }, "fields": [Field] }` → `{ "person", "answers": [{ "kind": "value" \| "resume" \| "skip" \| "ask", "id", "value"?, "reason"? }] }`. Same rules as the agent's own applications; nothing is stored or submitted |
-| POST | `/api/v1/apply/escalations` | Chrome extension, stuck: `{ "link_id", "url", "title", "company", "platform", "person", "kind", "reason" }` → `{ "id", "telegram": bool }`. Messages the person on Telegram; an open escalation for the same URL is returned instead of messaging again |
-| GET  | `/api/v1/apply/escalations/{id}` | `{ "id", "status": "open" \| "skip" \| "done", "answer", "created_at", "updated_at" }`. A Telegram reply to the message sets it: "skip"/"/skip" → skip, "done"/"fixed"/"ok" → done, other text → done with `answer` |
-| POST | `/api/v1/apply/escalations/{id}/resolve` | `{ "status": "done" \| "skip" }`: the page got fixed or the extension gave up. The first resolution wins; returns the escalation as above |
+| POST | `/api/v1/apply/answers` | Chrome extensions: `{ "person": "shashi", "job": { "title": "...", "company": "...", "skills": [] }, "fields": [Field] }` → `{ "person", "answers": [{ "kind": "value" \| "resume" \| "skip" \| "ask", "id", "value"?, "reason"? }] }`. Same rules as the agent's own applications; nothing is stored or submitted |
 | POST | `/api/v1/apply/events` | `{ "events": [{ "kind", "link_id"?, "url", "platform"?, "person"?, "field"?, "reason", "detail"? }] }` (at most 200; long text is cut) → `{ "stored": n }`. Every applier failure and outcome, for the feedback loop |
 | GET  | `/api/v1/apply/events/summary?days=7` | `{ "days", "by_kind": {kind: n}, "top": [{ "platform", "kind", "field", "reason", "count", "last_url", "last_at" }] }`: the 50 most frequent problems (`applied` left out of `top`) |
 | GET  | `/api/v1/applications?status=blocked` | Applications |

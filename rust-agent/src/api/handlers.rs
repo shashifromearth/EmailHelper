@@ -585,36 +585,6 @@ pub async fn apply_remember(
     Ok(Json(json!({ "remembered": crate::jobs::assist::remember(&app, req).await? })))
 }
 
-/// Chrome extension: stuck on a page; ask the person over Telegram.
-pub async fn apply_escalate(
-    State(app): State<Arc<App>>,
-    Json(req): Json<crate::db::apply::EscalationIn>,
-) -> AppResult<Json<Value>> {
-    let (e, telegram) = crate::jobs::feedback::escalate(&app, req).await?;
-    Ok(Json(json!({ "id": e.id, "telegram": telegram })))
-}
-
-/// Chrome extension: poll an escalation for the person's reply.
-pub async fn apply_escalation(State(app): State<Arc<App>>, Path(id): Path<String>) -> AppResult<Json<Value>> {
-    let e = app.db.call(move |c| crate::db::apply::get_escalation(c, &id)).await?;
-    Ok(Json(crate::jobs::feedback::view(&e)))
-}
-
-#[derive(Deserialize)]
-pub struct ResolveBody {
-    status: String,
-}
-
-/// Chrome extension: the page got fixed (`done`) or it gave up (`skip`).
-pub async fn apply_resolve(
-    State(app): State<Arc<App>>,
-    Path(id): Path<String>,
-    Json(b): Json<ResolveBody>,
-) -> AppResult<Json<Value>> {
-    let e = crate::jobs::feedback::resolve(&app, id, b.status).await?;
-    Ok(Json(crate::jobs::feedback::view(&e)))
-}
-
 #[derive(Deserialize)]
 pub struct EventsBody {
     events: Vec<crate::db::apply::EventIn>,

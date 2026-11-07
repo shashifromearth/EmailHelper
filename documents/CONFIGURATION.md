@@ -108,7 +108,8 @@ Browser worker settings (read by `browser-worker/`, which also needs
 ## Job-link queue
 
 `job-links/` is a separate local service: the shared job database the
-Chrome extension applies from (in your own browser). With
+Chrome extensions (`../JobBoardApplier`, `../JobApplier`) apply from, in your
+own browser. With
 `JOB_LINKS_ENABLED=true` the job agent writes every job link it finds in mail
 to the service, with the person, mailbox, email id, what the alert says about
 the job, a matcher score/decision from that and the resume to use, **instead

@@ -8,7 +8,7 @@ email drafting.
 | Rust agent (`emailhelper`) | everything | build from source (below) or Docker |
 | Thunderbird extension | email detection + draft saving | `dist/emailhelper-thunderbird.xpi` |
 | Ollama + a model | local LLM (default) | https://ollama.com |
-| Chrome extension | applying to queued jobs (you submit) | `chrome-extension/` (Load unpacked; see its README) |
+| Chrome extensions | applying to queued jobs | `../JobBoardApplier/extension` and `../JobApplier/extension` (Load unpacked; see their READMEs) |
 | Browser worker (Node + Playwright) | legacy agent-driven applications, LinkedIn people search | `browser-worker/` |
 | SearXNG | web research (optional) | Docker (`docker/`) |
 

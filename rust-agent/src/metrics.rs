@@ -212,7 +212,7 @@ impl Metrics {
             apply_events_total: counter_vec(
                 &r,
                 "apply_events_total",
-                "Chrome extension applier events (failures, applications, escalations)",
+                "Job applier events from the Chrome extensions (failures, applications)",
                 &["kind"],
             ),
             build_info,

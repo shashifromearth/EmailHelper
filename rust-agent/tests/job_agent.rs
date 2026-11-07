@@ -895,68 +895,6 @@ async fn extension_gets_form_answers_and_applies_nothing() {
 }
 
 #[tokio::test]
-async fn extension_escalation_asks_on_telegram_once_and_learns_the_reply() {
-    let env = setup("review", json!([]), true).await;
-    let agent = &env.agent;
-    let body = json!({
-        "link_id": "l-1", "url": JOB_URL, "title": "Staff AI Engineer", "company": "Acme",
-        "platform": "greenhouse", "person": null, "kind": "captcha", "reason": "CAPTCHA on the form"
-    });
-    let first: Value = agent.post("/api/v1/apply/escalations", &body).await.json().await.unwrap();
-    assert_eq!(first["telegram"], true);
-    let id = first["id"].as_str().unwrap().to_string();
-    // Still open: the same escalation comes back and nobody is messaged twice.
-    let again: Value = agent.post("/api/v1/apply/escalations", &body).await.json().await.unwrap();
-    assert_eq!(again["id"], first["id"]);
-    let asks: Vec<String> = telegram_texts(&env.tg)
-        .await
-        .into_iter()
-        .filter(|t| t.contains("Job applier needs you"))
-        .collect();
-    assert_eq!(asks.len(), 1, "{asks:?}");
-    assert!(asks[0].contains("Staff AI Engineer — Acme") && asks[0].contains("Why: CAPTCHA on the form"), "{}", asks[0]);
-    assert!(asks[0].contains(JOB_URL));
-    let path = format!("/api/v1/apply/escalations/{id}");
-    assert_eq!(agent.get_json(&path).await["status"], "open");
-
-    // The person replies "/skip" to the message (id 4242 from the mock).
-    let tg_msg = |id: i64, text: Option<&str>, reply_to: Option<Message>| Message {
-        message_id: id,
-        chat: Chat { id: 777, ..Default::default() },
-        text: text.map(str::to_string),
-        reply_to_message: reply_to.map(Box::new),
-    };
-    let reply = tg_msg(5, Some("/skip"), Some(tg_msg(4242, None, None)));
-    let out = emailhelper::telegram::bot::handle_message(&agent.app, &reply).await.unwrap().unwrap();
-    assert_eq!(out, "Skipping it.");
-    let v = agent.get_json(&path).await;
-    assert_eq!((v["status"].as_str(), v["answer"].is_null()), (Some("skip"), true));
-
-    // The first resolution wins; the extension's resolve is a no-op now.
-    let r: Value = agent
-        .post(&format!("{path}/resolve"), &json!({"status": "done"}))
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(r["status"], "skip");
-    let bad = agent.post(&format!("{path}/resolve"), &json!({"status": "maybe"})).await;
-    assert_eq!(bad.status(), 422);
-    assert_eq!(agent.get("/api/v1/apply/escalations/nope").await.status(), 404);
-
-    // Closed, so the same page can escalate again; the extension resolves it.
-    let next: Value = agent.post("/api/v1/apply/escalations", &body).await.json().await.unwrap();
-    assert_ne!(next["id"], first["id"]);
-    let r: Value = agent
-        .post(&format!("/api/v1/apply/escalations/{}/resolve", next["id"].as_str().unwrap()), &json!({"status": "done"}))
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(r["status"], "done");
-}
-
-#[tokio::test]
 async fn extension_failures_are_stored_and_summarised() {
     let agent = builder().start().await;
     let fill = |url: &str| {
@@ -991,16 +929,6 @@ async fn extension_failures_are_stored_and_summarised() {
     let too_many: Vec<Value> = (0..201).map(|i| fill(&format!("https://x.test/{i}"))).collect();
     let r = agent.post("/api/v1/apply/events", &json!({ "events": too_many })).await;
     assert_eq!(r.status(), 422);
-
-    // Without Telegram an escalation is still stored, just not messaged.
-    let r: Value = agent
-        .post("/api/v1/apply/escalations", &json!({"url": "https://y.test/1", "kind": "login_required", "reason": "sign-in wall"}))
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(r["telegram"], false);
-    assert!(r["id"].as_str().is_some());
 }
 
 #[tokio::test]

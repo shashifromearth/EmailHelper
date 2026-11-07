@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app::App;
-use crate::db::{apply as adb, jobs as jdb, settings};
+use crate::db::{jobs as jdb, settings};
 use crate::error::AppResult;
 use crate::telegram::client::Message;
 use crate::telegram::Event;
@@ -30,13 +30,6 @@ pub async fn handle_message(app: &Arc<App>, msg: &Message) -> AppResult<Option<S
         return Ok(None);
     };
     let reply_to = msg.reply_to_message.as_ref().map(|m| m.message_id);
-    // A reply to the Chrome extension's call for help ("skip" may be "/skip").
-    if let Some(mid) = reply_to {
-        let chat = msg.chat.id;
-        if let Some(e) = app.db.call(move |c| adb::escalation_for_message(c, chat, mid)).await? {
-            return Ok(Some(crate::jobs::feedback::handle_reply(app, &e, text).await?));
-        }
-    }
     if let Some(cmd) = text.strip_prefix('/') {
         let cmd = cmd
             .split(['@', ' '])

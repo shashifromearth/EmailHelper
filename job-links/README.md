@@ -1,8 +1,8 @@
 # job-links
 
 The shared job database. The email agent (links in mail), the research agent
-(jobs found on the web) or you by hand add jobs; the Chrome extension claims
-them one at a time, fills the application in your own browser and reports the
+(jobs found on the web) or you by hand add jobs; the Chrome extensions claim
+them one at a time, fill the application in your own browser and report the
 result.
 
 - Binds to `127.0.0.1` only (port `JOB_LINKS_PORT`, default `7810`).
