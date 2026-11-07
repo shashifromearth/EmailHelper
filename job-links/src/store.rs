@@ -182,7 +182,14 @@ impl Store {
     /// Rebuild from a snapshot (later duplicates of a key are dropped).
     pub fn from_records(records: Vec<LinkRecord>) -> Self {
         let mut st = State::default();
-        for r in records {
+        for mut r in records {
+            // saved before its site had a platform of its own (listing sites → job_board)
+            if matches!(r.platform, Platform::CareerSite | Platform::Other) {
+                let now = canon::classify(&r.url);
+                if !matches!(now, Platform::CareerSite | Platform::Other) {
+                    r.platform = now;
+                }
+            }
             let key = dedupe_key(&r.url, r.person_id.as_deref());
             if st.by_key.contains_key(&key) || st.links.contains_key(&r.id) {
                 continue;

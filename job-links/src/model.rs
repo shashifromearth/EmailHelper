@@ -27,11 +27,15 @@ pub enum Platform {
     Ashby,
     Workday,
     CareerSite,
+    /// A listing site that links out to the employer (RemoteOK, We Work
+    /// Remotely, arbeitnow, Jobicy, …): the job-board extension resolves it to
+    /// the employer's own apply link.
+    JobBoard,
     Other,
 }
 
 impl Platform {
-    pub const ALL: [Platform; 11] = [
+    pub const ALL: [Platform; 12] = [
         Self::Linkedin,
         Self::Naukri,
         Self::Glassdoor,
@@ -42,6 +46,7 @@ impl Platform {
         Self::Ashby,
         Self::Workday,
         Self::CareerSite,
+        Self::JobBoard,
         Self::Other,
     ];
 
@@ -57,6 +62,7 @@ impl Platform {
             Self::Ashby => "ashby",
             Self::Workday => "workday",
             Self::CareerSite => "career_site",
+            Self::JobBoard => "job_board",
             Self::Other => "other",
         }
     }

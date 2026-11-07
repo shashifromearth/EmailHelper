@@ -168,6 +168,8 @@ pub fn classify(url: &str) -> Platform {
         Platform::Ashby
     } else if on("myworkdayjobs.com") || on("myworkdaysite.com") || on("workday.com") {
         Platform::Workday
+    } else if is_listing_site(&host) {
+        Platform::JobBoard
     } else if host.starts_with("careers.")
         || host.starts_with("jobs.")
         || ["/careers", "/career/", "/jobs/", "/job/", "/positions/", "/openings/", "/vacancies/"]
@@ -178,6 +180,35 @@ pub fn classify(url: &str) -> Platform {
     } else {
         Platform::Other
     }
+}
+
+/// Job listing sites (aggregators and remote boards) whose job pages link out
+/// to the employer's own application.
+pub fn is_listing_site(host: &str) -> bool {
+    const DOMAINS: [&str; 18] = [
+        "jobicy.com",
+        "weworkremotely.com",
+        "himalayas.app",
+        "remoteok.com",
+        "remoteok.io",
+        "remotive.com",
+        "remotive.io",
+        "arc.dev",
+        "workatastartup.com",
+        "jobgether.com",
+        "globalremote.co",
+        "remotelyjobs.com",
+        "themuse.com",
+        "jooble.org",
+        "careerjet.com",
+        "careerjet.co.in",
+        "adzuna.com",
+        "adzuna.in",
+    ];
+    let on = |dom: &str| host == dom || host.ends_with(&format!(".{dom}"));
+    // arbeitnow.com / .co.uk / .fr / .ch / .nl …
+    let arbeitnow = host == "arbeitnow.com" || host.starts_with("arbeitnow.") || host.contains(".arbeitnow.");
+    arbeitnow || DOMAINS.iter().any(|d| on(d)) || host == "news.ycombinator.com" || host == "www.ycombinator.com" || host == "ycombinator.com"
 }
 
 #[cfg(test)]
@@ -260,5 +291,10 @@ mod tests {
         assert_eq!(c("https://careers.acme.com/role/1"), Platform::CareerSite);
         assert_eq!(c("https://acme.com/jobs/staff-engineer"), Platform::CareerSite);
         assert_eq!(c("https://example.com/blog/post"), Platform::Other);
+        assert_eq!(c("https://jobicy.com/jobs/152499-backend-engineer-iii"), Platform::JobBoard);
+        assert_eq!(c("https://www.arbeitnow.co.uk/jobs/companies/kraken/lead-1"), Platform::JobBoard);
+        assert_eq!(c("https://weworkremotely.com/remote-jobs/acme-engineer"), Platform::JobBoard);
+        assert_eq!(c("https://remoteok.com/remote-jobs/123"), Platform::JobBoard);
+        assert_eq!(c("https://www.ycombinator.com/companies/acme/jobs/1-engineer"), Platform::JobBoard);
     }
 }
